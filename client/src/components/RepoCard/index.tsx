@@ -1,8 +1,5 @@
-// eslint-disable-next-line import/no-duplicates
 import { formatDistanceToNow } from 'date-fns';
-// eslint-disable-next-line import/no-duplicates
-import { ja } from 'date-fns/locale';
-import { MouseEvent, useCallback, useContext, useMemo } from 'react';
+import { memo, MouseEvent, useCallback, useContext, useMemo } from 'react';
 import { Trans, useTranslation } from 'react-i18next';
 import {
   GitHubLogo,
@@ -13,7 +10,7 @@ import {
 } from '../../icons';
 import { MenuItemType, SyncStatus } from '../../types/general';
 import FileIcon from '../FileIcon';
-import { getFileExtensionForLang } from '../../utils';
+import { getDateFnsLocale, getFileExtensionForLang } from '../../utils';
 import BarLoader from '../Loaders/BarLoader';
 import { UIContext } from '../../context/uiContext';
 import { TabsContext } from '../../context/tabsContext';
@@ -31,7 +28,7 @@ type Props = {
   repoRef: string;
   provider: 'local' | 'github';
   syncStatus?: { percentage: number } | null;
-  onDelete: () => void;
+  onDelete: (ref: string) => void;
   indexedBranches?: string[];
 };
 
@@ -79,16 +76,17 @@ const RepoCard = ({
       isGh ? RepoSource.GH : RepoSource.LOCAL,
       indexedBranches?.[0],
     );
-  }, [repoName, provider, isGithubConnected, sync_status, last_index]);
+  }, [repoRef, repoName, isGh, last_index, indexedBranches, handleAddTab]);
 
   const onRepoRemove = useCallback(
     (e: MouseEvent<HTMLButtonElement>) => {
       e.stopPropagation();
       deleteRepo(repoRef);
-      if (tabs.find((t) => t.key === repoRef)) {
-        handleRemoveTab(repoRef);
-      }
-      onDelete();
+      const tabsForThisRepo = tabs.filter((t) => t.repoRef === repoRef);
+      tabsForThisRepo.forEach((t) => {
+        handleRemoveTab(t.key);
+      });
+      onDelete(repoRef);
     },
     [repoRef, tabs],
   );
@@ -147,6 +145,19 @@ const RepoCard = ({
     return items;
   }, [sync_status, onRepoRemove, onSync, onCancelSync]);
 
+  const syncStatusToUse = useMemo(() => {
+    if (typeof sync_status !== 'string') {
+      return SyncStatus.Error;
+    }
+    if (
+      sync_status === 'done' &&
+      (!last_index || last_index === '1970-01-01T00:00:00Z')
+    ) {
+      return SyncStatus.Queued;
+    }
+    return sync_status;
+  }, [sync_status, last_index]);
+
   return (
     <a
       href="#"
@@ -195,21 +206,15 @@ const RepoCard = ({
           )}
           <span
             className={`w-2 h-2 ${
-              STATUS_MAP[
-                typeof sync_status === 'string' ? sync_status : 'error'
-              ]?.color || 'bg-yellow'
+              STATUS_MAP[syncStatusToUse]?.color || 'bg-yellow'
             } rounded-full`}
           />
           <p className="select-none">
-            {t(
-              STATUS_MAP[
-                typeof sync_status === 'string' ? sync_status : 'error'
-              ]?.text || sync_status,
-            )}
-            {sync_status === 'done' &&
+            {t(STATUS_MAP[syncStatusToUse]?.text || sync_status)}
+            {syncStatusToUse === 'done' &&
               formatDistanceToNow(new Date(last_index), {
                 addSuffix: true,
-                ...(locale === 'ja' ? { locale: ja } : {}),
+                ...(getDateFnsLocale(locale) || {}),
               })}
           </p>
         </div>
@@ -218,4 +223,4 @@ const RepoCard = ({
   );
 };
 
-export default RepoCard;
+export default memo(RepoCard);

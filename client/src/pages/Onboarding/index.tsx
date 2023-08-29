@@ -1,4 +1,10 @@
-import React, { useCallback, useContext, useEffect, useState } from 'react';
+import React, {
+  memo,
+  useCallback,
+  useContext,
+  useEffect,
+  useState,
+} from 'react';
 import { useTranslation } from 'react-i18next';
 import { UIContext } from '../../context/uiContext';
 import { DeviceContext } from '../../context/deviceContext';
@@ -12,15 +18,9 @@ import {
   SESSION_ID_KEY,
   USER_DATA_FORM,
 } from '../../services/storage';
-import {
-  getConfig,
-  getRepos,
-  gitHubStatus,
-  saveUserData,
-} from '../../services/api';
+import { getConfig, getRepos, saveUserData } from '../../services/api';
 import SeparateOnboardingStep from '../../components/SeparateOnboardingStep';
 import StatusBar from '../../components/StatusBar';
-import GitHubConnect from './GitHubConnect';
 import UserForm from './UserForm';
 import FeaturesStep from './FeaturesStep';
 import SelfServeStep from './SelfServeStep';
@@ -43,7 +43,6 @@ const Onboarding = () => {
     emailError: null,
     ...getJsonFromStorage(USER_DATA_FORM),
   });
-  const [isGitHubScreen, setGitHubScreen] = useState(false);
   const [shouldShowPopup, setShouldShowPopup] = useState(false);
   const { shouldShowWelcome, setShouldShowWelcome } = useContext(
     UIContext.Onboarding,
@@ -51,6 +50,7 @@ const Onboarding = () => {
   const { isGithubConnected } = useContext(UIContext.GitHubConnected);
   const { isSelfServe, os, setEnvConfig, envConfig } =
     useContext(DeviceContext);
+  const [isJustUpdated, setJustUpdated] = useState(false);
 
   const closeOnboarding = useCallback(() => {
     setShouldShowWelcome(false);
@@ -81,9 +81,11 @@ const Onboarding = () => {
           setShouldShowWelcome(true);
         });
     } else {
-      gitHubStatus()
+      getConfig()
         .then((d) => {
-          if (d.status !== 'ok') {
+          setEnvConfig(d);
+          if (!d.user_login) {
+            setJustUpdated(d.credentials_upgrade);
             setShouldShowWelcome(true);
           } else {
             closeOnboarding();
@@ -160,20 +162,9 @@ const Onboarding = () => {
         <div className="flex h-full justify-center mt-8">
           <div className="w-full lg:w-1/2 h-full flex justify-center">
             <div
-              className={`w-[512px] h-full flex flex-col items-center justify-center px-13 ${
-                isGitHubScreen ? 'gap-8' : 'gap-6'
-              }`}
+              className={`w-[512px] h-full flex flex-col items-center justify-center px-13 gap-6`}
             >
-              {!isGitHubScreen ? (
-                <UserForm
-                  form={form}
-                  setForm={setForm}
-                  setGitHubScreen={setGitHubScreen}
-                  onContinue={onSubmit}
-                />
-              ) : (
-                <GitHubConnect goBack={() => setGitHubScreen(false)} />
-              )}
+              <UserForm form={form} setForm={setForm} onContinue={onSubmit} />
             </div>
           </div>
           <div
@@ -198,4 +189,4 @@ const Onboarding = () => {
   );
 };
 
-export default Onboarding;
+export default memo(Onboarding);

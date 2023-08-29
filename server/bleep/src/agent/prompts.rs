@@ -9,7 +9,7 @@ pub fn functions(add_proc: bool) -> serde_json::Value {
                     "properties": {
                         "query": {
                             "type": "string",
-                            "description": "The query with which to search. This should consist of keywords that might match something in the codebase, e.g. 'react functional components', 'contextmanager', 'bearer token'"
+                            "description": "The query with which to search. This should consist of keywords that might match something in the codebase, e.g. 'react functional components', 'contextmanager', 'bearer token'. It should NOT contain redundant words like 'usage' or 'example'."
                         }
                     },
                     "required": ["query"]
@@ -17,7 +17,7 @@ pub fn functions(add_proc: bool) -> serde_json::Value {
             },
             {
                 "name": "path",
-                "description": "Search the pathnames in a codebase. Results may not be exact matches, but will be similar by some edit-distance. Use when you want to find a specific file or directory.",
+                "description": "Search the pathnames in a codebase. Use when you want to find a specific file or directory. Results may not be exact matches, but will be similar by some edit-distance.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -31,7 +31,7 @@ pub fn functions(add_proc: bool) -> serde_json::Value {
             },
             {
                 "name": "none",
-                "description": "You have enough information to answer the user's query. This is the final step, and signals that you have enough information to respond to the user's query. Use this if the user has instructed you to modify some code.",
+                "description": "Call this to answer the user. Call this only when you have enough information to answer the user's query.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -54,7 +54,7 @@ pub fn functions(add_proc: bool) -> serde_json::Value {
             serde_json::json!(
             {
                 "name": "proc",
-                "description": "Read one or more files and extract the line ranges which are relevant to the search terms. Do not proc more than 10 files at a time.",
+                "description": "Read one or more files and extract the line ranges that are relevant to the search terms",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -66,7 +66,7 @@ pub fn functions(add_proc: bool) -> serde_json::Value {
                             "type": "array",
                             "items": {
                                 "type": "integer",
-                                "description": "The indices of the paths to search. paths.len() <= 10"
+                                "description": "The indices of the paths to search. paths.len() <= 5"
                             }
                         }
                     },
@@ -85,31 +85,32 @@ pub fn system<'a>(paths: impl IntoIterator<Item = &'a str>) -> String {
     let mut paths = paths.into_iter().peekable();
 
     if paths.peek().is_some() {
-        s.push_str("## PATHS ##\nalias, path\n");
+        s.push_str("## PATHS ##\nindex, path\n");
         for (i, path) in paths.enumerate() {
             s.push_str(&format!("{}, {}\n", i, path));
         }
+        s.push('\n');
     }
 
     s.push_str(
-        r#"Follow these rules at all times:
+        r#"Your job is to choose the best action. Call functions to find information that will help answer the user's query. Call functions.none when you have enough information to answer. Follow these rules at all times:
 
-- If the output of a function is empty, try the same function again with different arguments or try using a different function
+- ALWAYS call a function, DO NOT answer the question directly, even if the query is not in English
+- DO NOT call a function that you've used before with the same arguments
+- DO NOT assume the structure of the codebase, or the existence of files or folders
+- Call functions.none with paths that you are confident will help answer the user's query
+- In most cases call functions.code or functions.path functions before calling functions.none
+- If the user is referring to, or asking for, information that is in your history, call functions.none
+- If after attempting to gather information you are still unsure how to answer the query, call functions.none
+- If the query is a greeting, or not a question or an instruction call functions.none
 - When calling functions.code or functions.path, your query should consist of keywords. E.g. if the user says 'What does contextmanager do?', your query should be 'contextmanager'. If the user says 'How is contextmanager used in app', your query should be 'contextmanager app'. If the user says 'What is in the src directory', your query should be 'src'
-- In most cases respond with functions.code or functions.path functions before responding with functions.none
-- If the user is referring to information that is already in your history, respond with functions.none
-- Do not assume the structure of the codebase, or the existence of files or folders
-- Do NOT respond with a function that you've used before with the same arguments
-- When you have enough information to answer the user's query respond with functions.none
-- Only refer to path aliases that are under the PATHS heading above
-- Respond with functions to find information related to the query, until all relevant information has been found
-- Only call functions.none with paths that contain code that might help answer the user's query, or which answer it directly
-- If you have already called functions.code or functions.path but they did not return any relevant information, try again with a substantively different query. The terms in your new query should not overlap with terms in previous queries
-- Use functions.proc on paths that you suspect might contain relevant information, or to expand on code that's already been returned by a code search. Do not pass more than 10 paths to functions.proc at a time
-- If after attempting to gather information you are still unsure how to answer the query, respond with the functions.none function
-- If the query is a greeting, or not a question or an instruction use functions.none
-- Always use a function, even if the query is not in English
-- Always respond with a function call. Do NOT answer the question directly"#);
+- If functions.code or functions.path did not return any relevant information, call them again with a SIGNIFICANTLY different query. The terms in the new query should not overlap with terms in your old one
+- If the output of a function is empty, try calling the function again with DIFFERENT arguments OR try calling a different function
+- Only call functions.proc with path indices that are under the PATHS heading above
+- Call functions.proc with paths that might contain relevant information. Either because of the path name, or to expand on code that's already been returned by functions.code 
+- DO NOT call functions.proc with more than 5 paths
+- DO NOT call functions.proc on the same file more than once
+- ALWAYS call a function. DO NOT answer the question directly"#);
     s
 }
 
@@ -148,8 +149,28 @@ A: "#
     )
 }
 
-pub fn answer_article_prompt(context: &str) -> String {
-    format!(
+pub fn answer_article_prompt(aliases: &[usize], context: &str) -> String {
+    // Return different prompts depending on whether there is one or many aliases
+    let one_prompt = format!(
+        r#"{context}#####
+
+A user is looking at the code above, your job is to write an article answering their query.
+
+Your output will be interpreted as bloop-markdown which renders with the following rules:
+- Inline code must be expressed as a link to the correct line of code using the URL format: `[bar](src/foo.rs#L50)` or `[bar](src/foo.rs#L50-L54)`
+- Do NOT output bare symbols. ALL symbols must include a link
+  - E.g. Do not simply write `Bar`, write [`Bar`](src/bar.rs#L100-L105).
+  - E.g. Do not simply write "Foos are functions that create `Foo` values out of thin air." Instead, write: "Foos are functions that create [`Foo`](src/foo.rs#L80-L120) values out of thin air."
+- Only internal links to the current file work
+- Basic markdown text formatting rules are allowed, and you should use titles to improve readability
+
+Here is an example response:
+
+A function [`openCanOfBeans`](src/beans/open.py#L7-L19) is defined. This function is used to handle the opening of beans. It includes the variable [`openCanOfBeans`](src/beans/open.py#L9) which is used to store the value of the tin opener.
+"#
+    );
+
+    let many_prompt = format!(
         r#"{context}Your job is to answer a query about a codebase using the information above.
 
 Provide only as much information and code as is necessary to answer the query, but be concise. Keep number of quoted lines to a minimum when possible. If you do not have enough information needed to answer the query, do not make up an answer.
@@ -205,7 +226,13 @@ println!("hello world!");
   - Note: the line range is inclusive
 - When writing example code blocks, use `<GeneratedCode>`, and when quoting existing code, use `<QuotedCode>`.
 - You MUST use XML code blocks instead of markdown."#
-    )
+    );
+
+    if aliases.len() == 1 {
+        one_prompt
+    } else {
+        many_prompt
+    }
 }
 
 pub fn hypothetical_document_prompt(query: &str) -> String {

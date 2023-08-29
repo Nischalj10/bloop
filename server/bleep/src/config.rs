@@ -1,4 +1,4 @@
-use crate::{semantic::chunk::OverlapStrategy, state::StateSource};
+use crate::state::StateSource;
 use anyhow::{Context, Result};
 use clap::Parser;
 
@@ -6,7 +6,7 @@ use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize, Serializer};
 use std::path::{Path, PathBuf};
 
-#[derive(Serialize, Deserialize, Parser, Debug)]
+#[derive(Serialize, Deserialize, Parser, Debug, Clone)]
 #[clap(author, version, about, long_about = None)]
 pub struct Configuration {
     //
@@ -122,16 +122,32 @@ pub struct Configuration {
     /// Maximum number of tokens in a chunk (should be the model's input size)
     pub max_chunk_tokens: usize,
 
-    #[clap(long)]
-    /// Chunking strategy
-    pub overlap: Option<OverlapStrategy>,
+    #[clap(long, default_value_t = default_collection_name())]
+    #[serde(default = "default_collection_name")]
+    /// Qdrant collection name. Defaults to `documents`
+    pub collection_name: String,
+
+    //
+    // Cognito setup
+    //
+    /// Cognito userpool_id
+    pub cognito_userpool_id: Option<String>,
+
+    /// Cognito client_id
+    pub cognito_client_id: Option<String>,
+
+    /// Entry point to the Cognito authentication flow
+    pub cognito_auth_url: Option<String>,
+
+    /// Auth management base URL
+    pub cognito_mgmt_url: Option<String>,
 
     //
     // Installation-specific values
     //
     #[clap(long)]
     #[serde(serialize_with = "serialize_secret_opt_str", default)]
-    /// Github Client ID for either OAuth or GitHub Apps
+    /// Github Client ID for GitHub Apps
     pub github_client_id: Option<SecretString>,
 
     // Github client secret
@@ -257,7 +273,11 @@ impl Configuration {
                 default_max_chunk_tokens()
             ),
 
-            overlap: b.overlap.or(a.overlap),
+            collection_name: right_if_default!(
+                b.collection_name,
+                a.collection_name,
+                default_collection_name()
+            ),
 
             frontend_dist: b.frontend_dist.or(a.frontend_dist),
 
@@ -268,6 +288,14 @@ impl Configuration {
                 a.answer_api_url,
                 default_answer_api_url()
             ),
+
+            cognito_userpool_id: b.cognito_userpool_id.or(a.cognito_userpool_id),
+
+            cognito_client_id: b.cognito_client_id.or(a.cognito_client_id),
+
+            cognito_auth_url: b.cognito_auth_url.or(a.cognito_auth_url),
+
+            cognito_mgmt_url: b.cognito_mgmt_url.or(a.cognito_mgmt_url),
 
             github_client_id: b.github_client_id.or(a.github_client_id),
 
@@ -294,6 +322,11 @@ impl Configuration {
 
             dylib_dir: b.dylib_dir.or(a.dylib_dir),
         }
+    }
+
+    /// Directory where logs are written to
+    pub fn log_dir(&self) -> PathBuf {
+        self.index_dir.join("logs")
     }
 }
 
@@ -329,6 +362,10 @@ fn default_index_dir() -> PathBuf {
 
 fn default_model_dir() -> PathBuf {
     "model".into()
+}
+
+fn default_collection_name() -> String {
+    "documents".into()
 }
 
 pub fn default_parallelism() -> usize {

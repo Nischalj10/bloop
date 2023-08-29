@@ -95,6 +95,7 @@ export type UITabType = {
   key: string;
   name: string;
   repoName: string;
+  repoRef: string;
   source: RepoSource;
   branch?: string | null;
   navigationHistory: NavigationItem[];
@@ -253,6 +254,7 @@ export type EnvConfig = {
   bloop_user_profile?: {
     prompt_guide?: string;
   };
+  credentials_upgrade?: boolean;
 };
 
 export type IpynbOutputType = {
@@ -277,6 +279,7 @@ export type IpynbOutputType = {
   gif?: string;
   svg?: string;
   html?: string;
+  latex?: string;
   text?: string[];
   execution_count?: number;
   prompt_number?: number;
@@ -306,3 +309,5 @@ export type FileHighlightsType = Record<
   string,
   ({ lines: [number, number]; color: string; index: number } | undefined)[]
 >;
+
+export type LocaleType = 'en' | 'ja' | 'zhCN' | 'es';

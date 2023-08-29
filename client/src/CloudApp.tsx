@@ -10,11 +10,12 @@ import {
   LANGUAGE_KEY,
   savePlainToStorage,
 } from './services/storage';
+import { LocaleType } from './types/general';
 
 const CloudApp = () => {
   const [envConfig, setEnvConfig] = useState({});
-  const [locale, setLocale] = useState(
-    getPlainFromStorage(LANGUAGE_KEY) || 'en',
+  const [locale, setLocale] = useState<LocaleType>(
+    (getPlainFromStorage(LANGUAGE_KEY) as LocaleType | null) || 'en',
   );
 
   useEffect(() => {
@@ -34,7 +35,7 @@ const CloudApp = () => {
         platform: '',
         version: '',
       },
-      invokeTauriCommand: () => {},
+      invokeTauriCommand: () => Promise.resolve(''),
       release: packageJson.version,
       apiUrl: import.meta.env.API_URL || '/api',
       isRepoManagementAllowed: true,

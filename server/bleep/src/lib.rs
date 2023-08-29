@@ -25,7 +25,10 @@ use state::PersistedState;
 use std::fs::canonicalize;
 use user::UserProfile;
 
-use crate::{background::SyncQueue, indexes::Indexes, semantic::Semantic, state::RepositoryPool};
+use crate::{
+    background::SyncQueue, indexes::Indexes, remotes::CognitoGithubTokenBundle, semantic::Semantic,
+    state::RepositoryPool,
+};
 use anyhow::{bail, Result};
 use axum::extract::FromRef;
 
@@ -41,12 +44,14 @@ use tracing_subscriber::{
     EnvFilter,
 };
 
+mod agent;
 mod background;
 mod cache;
 mod collector;
 mod config;
 mod db;
 mod env;
+mod llm_gateway;
 mod remotes;
 mod repo;
 mod webserver;
@@ -97,7 +102,7 @@ pub struct Application {
     indexes: Arc<Indexes>,
 
     /// Remote backend credentials
-    credentials: remotes::Backends,
+    credentials: PersistedState<remotes::Backends>,
 
     /// Main cookie encryption keypair
     cookie_key: axum_extra::extract::cookie::Key,
@@ -176,7 +181,9 @@ impl Application {
             .into(),
             sync_queue: SyncQueue::start(config.clone()),
             cookie_key: config.source.initialize_cookie_key()?,
-            credentials: config.source.initialize_credentials()?.into(),
+            credentials: config
+                .source
+                .load_state_or("credentials", remotes::Backends::default())?,
             user_profiles: config.source.load_or_default("user_profiles")?,
             sql: sqlite,
             repo_pool,
@@ -256,6 +263,10 @@ impl Application {
                 tokio::spawn(periodic::sync_github_status(self.clone()));
                 tokio::spawn(periodic::check_repo_updates(self.clone()));
                 tokio::spawn(periodic::log_and_branch_rotate(self.clone()));
+
+                if !self.env.is_cloud_instance() {
+                    tokio::spawn(periodic::clear_disk_logs(self.clone()));
+                }
             }
 
             joins.spawn(webserver::start(self));
@@ -308,8 +319,8 @@ impl Application {
         self.sync_queue.bind(self.clone())
     }
 
-    fn github_token(&self) -> Result<Option<SecretString>> {
-        Ok(if self.env.allow(env::Feature::GithubDeviceFlow) {
+    fn answer_api_token(&self) -> Result<Option<SecretString>> {
+        Ok(if self.env.allow(env::Feature::CognitoUserAuth) {
             let Some(cred) = self.credentials.github() else {
                 bail!("missing Github token");
             };
@@ -318,18 +329,15 @@ impl Application {
             match cred {
                 State {
                     auth:
-                        Auth::OAuth {
+                        Auth::OAuth(CognitoGithubTokenBundle {
                             access_token: token,
                             ..
-                        },
+                        }),
                     ..
-                } => Some(token),
+                } => Some(token.into()),
 
-                State {
-                    auth: Auth::App { .. },
-                    ..
-                } => {
-                    bail!("cannot connect to answer API using installation token");
+                _ => {
+                    bail!("cannot connect to answer API");
                 }
             }
         } else {
@@ -348,8 +356,7 @@ fn tracing_subscribe(config: &Configuration) -> bool {
     let env_filter_layer = fmt::layer().with_filter(EnvFilter::from_env(LOG_ENV_VAR));
     let sentry_layer = sentry_layer();
     let log_writer_layer = (!config.disable_log_write).then(|| {
-        let log_dir = config.index_dir.join("logs");
-        let file_appender = tracing_appender::rolling::daily(log_dir, "bloop.log");
+        let file_appender = tracing_appender::rolling::daily(config.log_dir(), "bloop.log");
         let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
         _ = LOGGER_GUARD.set(guard);
         fmt::layer()

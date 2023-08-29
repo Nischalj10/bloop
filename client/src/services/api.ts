@@ -127,9 +127,6 @@ export const gitHubDeviceLogin = () =>
 export const gitHubLogout = () =>
   http.get('/remotes/github/logout').then((r) => r.data);
 
-export const gitHubStatus = () =>
-  http.get('/remotes/github/status').then((r) => r.data);
-
 export const getRepos = (): Promise<{ list: RepoType[] }> =>
   http.get('/repos').then((r) => r.data);
 
@@ -174,6 +171,8 @@ export const saveBugReport = (report: {
   text: string;
   unique_id: string;
   app_version: string;
+  metadata: string;
+  server_log: string;
 }) => axios.post(`${DB_API}/bug_reports`, report).then((r) => r.data);
 
 export const saveCrashReport = (report: {
@@ -182,6 +181,7 @@ export const saveCrashReport = (report: {
   info: string;
   metadata: string;
   app_version: string;
+  server_log: string;
 }) => axios.post(`${DB_API}/crash_reports`, report).then((r) => r.data);
 
 export const saveUpvote = (upvote: {
