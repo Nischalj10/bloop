@@ -149,12 +149,15 @@ A: "#
     )
 }
 
-pub fn answer_article_prompt(aliases: &[usize], context: &str) -> String {
+/// Generate an answer article prompt.
+///
+/// The `multi` argument determines whether to use the "multiple file" variant of this prompt.
+pub fn answer_article_prompt(multi: bool, context: &str) -> String {
     // Return different prompts depending on whether there is one or many aliases
     let one_prompt = format!(
         r#"{context}#####
 
-A user is looking at the code above, your job is to write an article answering their query.
+A user is looking at the code above, your job is to answer their query.
 
 Your output will be interpreted as bloop-markdown which renders with the following rules:
 - Inline code must be expressed as a link to the correct line of code using the URL format: `[bar](src/foo.rs#L50)` or `[bar](src/foo.rs#L50-L54)`
@@ -162,7 +165,7 @@ Your output will be interpreted as bloop-markdown which renders with the followi
   - E.g. Do not simply write `Bar`, write [`Bar`](src/bar.rs#L100-L105).
   - E.g. Do not simply write "Foos are functions that create `Foo` values out of thin air." Instead, write: "Foos are functions that create [`Foo`](src/foo.rs#L80-L120) values out of thin air."
 - Only internal links to the current file work
-- Basic markdown text formatting rules are allowed, and you should use titles to improve readability
+- Basic markdown text formatting rules are allowed
 
 Here is an example response:
 
@@ -171,13 +174,14 @@ A function [`openCanOfBeans`](src/beans/open.py#L7-L19) is defined. This functio
     );
 
     let many_prompt = format!(
-        r#"{context}Your job is to answer a query about a codebase using the information above.
+        r#"{context}####
+
+Your job is to answer a query about a codebase using the information above.
 
 Provide only as much information and code as is necessary to answer the query, but be concise. Keep number of quoted lines to a minimum when possible. If you do not have enough information needed to answer the query, do not make up an answer.
 When referring to code, you must provide an example in a code block.
 
 Respect these rules at all times:
-- Do not refer to paths by alias, expand to the full path
 - Link ALL paths AND code symbols (functions, methods, fields, classes, structs, types, variables, values, definitions, directories, etc) by embedding them in a markdown link, with the URL corresponding to the full path, and the anchor following the form `LX` or `LX-LY`, where X represents the starting line number, and Y represents the ending line number, if the reference is more than one line.
   - For example, to refer to lines 50 to 78 in a sentence, respond with something like: The compiler is initialized in [`src/foo.rs`](src/foo.rs#L50-L78)
   - For example, to refer to the `new` function on a struct, respond with something like: The [`new`](src/bar.rs#L26-53) function initializes the struct
@@ -190,12 +194,10 @@ Respect these rules at all times:
   - E.g. Do not simply write "Foos are functions that create `Foo` values out of thin air." Instead, write: "Foos are functions that create [`Foo`](src/foo.rs#L80-L120) values out of thin air."
 - Link all fields
   - E.g. Do not simply write: "It has one main field: `foo`." Instead, write: "It has one main field: [`foo`](src/foo.rs#L193)."
+- Do NOT link external urls not present in the context, do NOT link urls from the internet
 - Link all symbols, even when there are multiple in one sentence
   - E.g. Do not simply write: "Bars are [`Foo`]( that return a list filled with `Bar` variants." Instead, write: "Bars are functions that return a list filled with [`Bar`](src/bar.rs#L38-L57) variants."
-- Always begin your answer with an appropriate title
-- Always finish your answer with a summary in a [^summary] footnote
-  - If you do not have enough information needed to answer the query, do not make up an answer. Instead respond only with a [^summary] f
-ootnote that asks the user for more information, e.g. `assistant: [^summary]: I'm sorry, I couldn't find what you were looking for, could you provide more information?`
+  - If you do not have enough information needed to answer the query, do not make up an answer. Instead respond only with a footnote that asks the user for more information, e.g. `assistant: I'm sorry, I couldn't find what you were looking for, could you provide more information?`
 - Code blocks MUST be displayed to the user using XML in the following formats:
   - Do NOT output plain markdown blocks, the user CANNOT see them
   - To create new code, you MUST mimic the following structure (example given):
@@ -228,11 +230,53 @@ println!("hello world!");
 - You MUST use XML code blocks instead of markdown."#
     );
 
-    if aliases.len() == 1 {
-        one_prompt
-    } else {
+    if multi {
         many_prompt
+    } else {
+        one_prompt
     }
+}
+
+pub fn studio_article_prompt(context: &str) -> String {
+    format!(
+        r#"{context}Your job is to answer a query about a codebase using the information above.
+
+You must use the following formatting rules at all times:
+- Provide only as much information and code as is necessary to answer the query and be concise
+- If you do not have enough information needed to answer the query, do not make up an answer
+- When referring to code, you must provide an example in a code block
+- Keep number of quoted lines of code to a minimum when possible
+- Basic markdown is allowed"#
+    )
+}
+
+pub fn studio_name_prompt(context_json: &str, messages_json: &str) -> String {
+    format!(
+        r#"Your job is to generate a name for a conversation about software source code, given source code context and conversation history.
+        
+Follow these rules strictly:
+    - You MUST only return the new title, and NO additional text
+    - Be brief, only return a few words, 3-5 is ideal
+    - Do NOT include quotation marks in your title
+    - Do NOT use gerunds (e.g. "Searching for...")
+
+Here are some example titles demonstrating the correct style:
+    - Rust PyO3 Function Reference
+    - Update HelmRelease Chart Version
+    - Readable Code and Tests
+
+######
+
+Here is the source code context:
+=====
+{context_json}
+=====
+
+And here is the serialized conversation:
+=====
+{messages_json}
+====="#
+    )
 }
 
 pub fn hypothetical_document_prompt(query: &str) -> String {

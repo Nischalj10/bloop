@@ -22,7 +22,7 @@ use crate::{
     agent::{
         self,
         exchange::{CodeChunk, Exchange, FocusedChunk},
-        Action, Agent,
+        Action, Agent, ExchangeState,
     },
     analytics::{EventData, QueryEvent},
     db::QueryLog,
@@ -71,6 +71,8 @@ pub(super) async fn vote(
 pub struct Answer {
     pub q: String,
     pub repo_ref: RepoRef,
+    #[serde(default = "default_model")]
+    pub model: agent::model::AnswerModel,
     #[serde(default = "default_thread_id")]
     pub thread_id: uuid::Uuid,
     /// Optional id of the parent of the exchange to overwrite
@@ -80,6 +82,10 @@ pub struct Answer {
 
 fn default_thread_id() -> uuid::Uuid {
     uuid::Uuid::new_v4()
+}
+
+fn default_model() -> agent::model::AnswerModel {
+    agent::model::GPT_3_5_TURBO_FINETUNED
 }
 
 pub(super) async fn answer(
@@ -121,11 +127,7 @@ pub(super) async fn answer(
         exchanges.truncate(truncate_from_index);
     }
 
-    let query = parser::parse_nl(q)
-        .context("parse error")?
-        .into_semantic()
-        .context("got a 'Grep' query")?
-        .into_owned();
+    let query = parser::parse_nl(q).context("parse error")?.into_owned();
     let query_target = query
         .target
         .as_ref()
@@ -247,6 +249,7 @@ async fn try_execute_agent(
     let Answer {
         thread_id,
         repo_ref,
+        model,
         ..
     } = params.clone();
     let stream = async_stream::try_stream! {
@@ -261,7 +264,8 @@ async fn try_execute_agent(
             user,
             thread_id,
             query_id,
-            complete: false,
+            exchange_state: ExchangeState::Pending,
+            model,
         };
 
         let mut exchange_rx = tokio_stream::wrappers::ReceiverStream::new(exchange_rx);
@@ -312,6 +316,8 @@ async fn try_execute_agent(
             }
         };
 
+        agent.complete(result.is_ok());
+
         match result {
             Ok(_) => {}
             Err(agent::Error::Timeout(duration)) => {
@@ -330,10 +336,6 @@ async fn try_execute_agent(
                 Err(e)?;
             }
         }
-
-        // Storing the conversation here allows us to make subsequent requests.
-        conversations::store(&agent.app.sql, conversation_id, (agent.repo_ref.clone(), agent.exchanges.clone())).await?;
-        agent.complete();
     };
 
     let init_stream = futures::stream::once(async move {
@@ -392,6 +394,7 @@ pub async fn explain(
         repo_ref: params.repo_ref,
         thread_id: params.thread_id,
         parent_exchange_id: None,
+        model: agent::model::GPT_4,
     };
 
     let conversation_id = ConversationId {
@@ -404,9 +407,6 @@ pub async fn explain(
 
     let mut query = parser::parse_nl(&virtual_req.q)
         .context("failed to parse virtual answer query")?
-        .into_semantic()
-        // We synthesize the query, this should never fail.
-        .unwrap()
         .into_owned();
 
     if let Some(branch) = params.branch {

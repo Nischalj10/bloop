@@ -1,8 +1,10 @@
 import React, {
+  ChangeEvent,
   FormEvent,
   useCallback,
   useContext,
   useEffect,
+  useMemo,
   useRef,
   useState,
 } from 'react';
@@ -22,6 +24,7 @@ import { SearchContext } from '../../context/searchContext';
 import { mapLoadingSteps } from '../../mappers/conversation';
 import { findElementInCurrentTab } from '../../utils/domUtils';
 import { conversationsCache } from '../../services/cache';
+import AddStudioContext from '../AddStudioContext';
 import NLInput from './NLInput';
 import ChipButton from './ChipButton';
 import AllConversations from './AllCoversations';
@@ -44,6 +47,7 @@ const Chat = () => {
     UIContext.RightPanel,
   );
   const { tab } = useContext(UIContext.Tab);
+  const { preferredAnswerSpeed } = useContext(UIContext.AnswerSpeed);
   const { apiUrl } = useContext(DeviceContext);
   const { selectedBranch } = useContext(SearchContext.SelectedBranch);
   const { conversation, isChatOpen, submittedQuery, selectedLines, threadId } =
@@ -104,6 +108,8 @@ const Chat = () => {
               queryIdToEdit ? `&parent_query_id=${queryIdToEdit}` : ''
             }`
           : ''
+      }&model=${
+        preferredAnswerSpeed === 'normal' ? 'gpt-4' : 'gpt-3.5-turbo-finetuned'
       }`;
       console.log(url);
       const eventSource = new EventSource(url);
@@ -291,6 +297,7 @@ const Chat = () => {
       selectedBranch,
       t,
       queryIdToEdit,
+      preferredAnswerSpeed,
     ],
   );
 
@@ -400,6 +407,32 @@ const Chat = () => {
     setHideMessagesFrom(null);
   }, []);
 
+  const loadingSteps = useMemo(() => {
+    return conversation[conversation.length - 1]?.author ===
+      ChatMessageAuthor.Server
+      ? [
+          ...(conversation[conversation.length - 1] as ChatMessageServer)
+            .loadingSteps,
+          ...((conversation[conversation.length - 1] as ChatMessageServer)
+            ?.results?.length
+            ? [
+                {
+                  displayText: t('Responding...'),
+                  content: { query: '' },
+                  path: '',
+                  type: 'code' as const,
+                },
+              ]
+            : []),
+        ]
+      : undefined;
+  }, [JSON.stringify(conversation[conversation.length - 1])]);
+
+  const handleInputChange = useCallback(
+    (e: ChangeEvent<HTMLTextAreaElement>) => setInputValue(e.target.value),
+    [],
+  );
+
   return (
     <>
       <div
@@ -426,6 +459,12 @@ const Chat = () => {
                 <ChipButton onClick={handleNewConversation}>
                   <Trans>Create new</Trans>
                 </ChipButton>
+                {!!threadId && !isLoading && (
+                  <AddStudioContext
+                    threadId={threadId}
+                    name={conversation?.[0]?.text || 'New Studio'}
+                  />
+                )}
                 <ChipButton
                   variant="filled"
                   onClick={(e) => {
@@ -470,34 +509,9 @@ const Chat = () => {
               id="question-input"
               value={inputValue}
               onSubmit={onSubmit}
-              onChange={(e) => setInputValue(e.target.value)}
+              onChange={handleInputChange}
               isStoppable={isLoading}
-              loadingSteps={
-                conversation[conversation.length - 1]?.author ===
-                ChatMessageAuthor.Server
-                  ? [
-                      ...(
-                        conversation[
-                          conversation.length - 1
-                        ] as ChatMessageServer
-                      ).loadingSteps,
-                      ...((
-                        conversation[
-                          conversation.length - 1
-                        ] as ChatMessageServer
-                      )?.results?.length
-                        ? [
-                            {
-                              displayText: t('Responding...'),
-                              content: { query: '' },
-                              path: '',
-                              type: 'code' as const,
-                            },
-                          ]
-                        : []),
-                    ]
-                  : undefined
-              }
+              loadingSteps={loadingSteps}
               generationInProgress={
                 (conversation[conversation.length - 1] as ChatMessageServer)
                   ?.isLoading

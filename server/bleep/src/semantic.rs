@@ -2,34 +2,31 @@ use std::{borrow::Cow, collections::HashMap, env, path::Path, sync::Arc};
 
 use crate::{query::parser::SemanticQuery, Configuration};
 
-use ndarray::Axis;
-use ort::{
-    tensor::{FromArray, InputTensor, OrtOwnedTensor},
-    Environment, ExecutionProvider, GraphOptimizationLevel, LoggingLevel, SessionBuilder,
-};
+use anyhow::bail;
 use qdrant_client::{
     prelude::{QdrantClient, QdrantClientConfig},
     qdrant::{
-        point_id::PointIdOptions, r#match::MatchValue, vectors::VectorsOptions, vectors_config,
-        with_payload_selector, with_vectors_selector, CollectionOperationResponse,
-        CreateCollection, Distance, FieldCondition, FieldType, Filter, Match, PointId,
-        RetrievedPoint, ScoredPoint, SearchPoints, Value, VectorParams, Vectors, VectorsConfig,
-        WithPayloadSelector, WithVectorsSelector,
+        point_id::PointIdOptions, r#match::MatchValue, vectors::VectorsOptions,
+        with_payload_selector, with_vectors_selector, CollectionOperationResponse, FieldCondition,
+        FieldType, Filter, Match, PointId, RetrievedPoint, ScoredPoint, SearchPoints, Value,
+        Vectors, WithPayloadSelector, WithVectorsSelector,
     },
 };
 
 use futures::{stream, StreamExt, TryStreamExt};
 use rayon::prelude::*;
 use thiserror::Error;
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, error, info, warn};
 
 pub mod chunk;
+pub mod embedder;
 pub mod execute;
 mod schema;
 
+pub use embedder::Embedder;
+use embedder::LocalEmbedder;
+use schema::{create_collection, EMBEDDING_DIM};
 pub use schema::{Embedding, Payload};
-
-pub(crate) const EMBEDDING_DIM: usize = 384;
 
 #[derive(Error, Debug)]
 pub enum SemanticError {
@@ -53,9 +50,8 @@ pub enum SemanticError {
 #[derive(Clone)]
 pub struct Semantic {
     qdrant: Arc<QdrantClient>,
-    tokenizer: Arc<tokenizers::Tokenizer>,
-    session: Arc<ort::Session>,
-    config: Arc<Configuration>,
+    embedder: Arc<dyn Embedder>,
+    pub(crate) config: Arc<Configuration>,
 }
 
 macro_rules! val_str(($hash:ident, $val:expr) => { serde_json::from_value($hash.remove($val).unwrap()).unwrap() });
@@ -176,6 +172,17 @@ fn kind_to_value(kind: Option<qdrant_client::qdrant::value::Kind>) -> serde_json
     }
 }
 
+async fn create_indexes(collection_name: &str, qdrant: &QdrantClient) -> anyhow::Result<()> {
+    let text_fields = &["repo_ref", "content_hash", "branches", "relative_path"];
+    for field in text_fields {
+        qdrant
+            .create_field_index(collection_name, field, FieldType::Text, None, None)
+            .await?;
+    }
+
+    Ok(())
+}
+
 impl Semantic {
     pub async fn initialize(
         model_dir: &Path,
@@ -186,20 +193,10 @@ impl Semantic {
 
         match qdrant.has_collection(&config.collection_name).await {
             Ok(false) => {
-                let CollectionOperationResponse { result, time } = qdrant
-                    .create_collection(&CreateCollection {
-                        collection_name: config.collection_name.to_string(),
-                        vectors_config: Some(VectorsConfig {
-                            config: Some(vectors_config::Config::Params(VectorParams {
-                                size: EMBEDDING_DIM as u64,
-                                distance: Distance::Cosine.into(),
-                                ..Default::default()
-                            })),
-                        }),
-                        ..Default::default()
-                    })
-                    .await
-                    .unwrap();
+                let CollectionOperationResponse { result, time } =
+                    create_collection(&config.collection_name, &qdrant)
+                        .await
+                        .unwrap();
 
                 debug!(
                     time,
@@ -214,115 +211,86 @@ impl Semantic {
             Err(_) => return Err(SemanticError::QdrantInitializationError),
         }
 
-        qdrant
-            .create_field_index(
-                &config.collection_name,
-                "repo_ref",
-                FieldType::Text,
-                None,
-                None,
-            )
-            .await?;
-        qdrant
-            .create_field_index(
-                &config.collection_name,
-                "content_hash",
-                FieldType::Text,
-                None,
-                None,
-            )
-            .await?;
-        qdrant
-            .create_field_index(
-                &config.collection_name,
-                "branches",
-                FieldType::Text,
-                None,
-                None,
-            )
-            .await?;
-        qdrant
-            .create_field_index(
-                &config.collection_name,
-                "relative_path",
-                FieldType::Text,
-                None,
-                None,
-            )
-            .await?;
+        create_indexes(&config.collection_name, &qdrant).await?;
 
         if let Some(dylib_dir) = config.dylib_dir.as_ref() {
             init_ort_dylib(dylib_dir);
         }
 
-        let environment = Arc::new(
-            Environment::builder()
-                .with_name("Encode")
-                .with_log_level(LoggingLevel::Warning)
-                .with_execution_providers([ExecutionProvider::cpu()])
-                .with_telemetry(false)
-                .build()?,
-        );
-
-        let threads = if let Ok(v) = std::env::var("NUM_OMP_THREADS") {
-            str::parse(&v).unwrap_or(1)
+        #[cfg(feature = "ee")]
+        let embedder: Arc<dyn Embedder> = if let Some(ref url) = config.embedding_server_url {
+            Arc::new(embedder::RemoteEmbedder::new(url.clone(), model_dir)?)
         } else {
-            1
+            Arc::new(LocalEmbedder::new(model_dir)?)
         };
+
+        #[cfg(not(feature = "ee"))]
+        let embedder: Arc<dyn Embedder> = Arc::new(LocalEmbedder::new(model_dir)?);
 
         Ok(Self {
             qdrant: qdrant.into(),
-            tokenizer: tokenizers::Tokenizer::from_file(model_dir.join("tokenizer.json"))
-                .unwrap()
-                .into(),
-            session: SessionBuilder::new(&environment)?
-                .with_optimization_level(GraphOptimizationLevel::Level3)?
-                .with_intra_threads(threads)?
-                .with_model_from_file(model_dir.join("model.onnx"))?
-                .into(),
+            embedder,
             config,
         })
+    }
+
+    pub fn collection_name(&self) -> &str {
+        &self.config.collection_name
+    }
+
+    pub fn qdrant_client(&self) -> &QdrantClient {
+        &self.qdrant
+    }
+
+    pub fn embedder(&self) -> &dyn Embedder {
+        self.embedder.as_ref()
+    }
+
+    pub async fn reset_collection_blocking(&self) -> anyhow::Result<()> {
+        _ = self
+            .qdrant
+            .delete_collection(&self.config.collection_name)
+            .await?;
+
+        let deleted = 'deleted: {
+            for _ in 0..60 {
+                match self
+                    .qdrant
+                    .has_collection(&self.config.collection_name)
+                    .await
+                {
+                    Ok(true) => {
+                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    }
+                    Ok(false) => {
+                        break 'deleted true;
+                    }
+                    Err(err) => {
+                        error!(?err, "failed to delete qdrant collection for migration");
+                    }
+                }
+            }
+            false
+        };
+
+        if !deleted {
+            error!("failed to delete qdrant collection after 60s");
+            bail!("deletion failed")
+        }
+
+        let CollectionOperationResponse { result, .. } =
+            create_collection(&self.config.collection_name, &self.qdrant)
+                .await
+                .unwrap();
+
+        assert!(result);
+
+        Ok(())
     }
 
     pub async fn health_check(&self) -> anyhow::Result<()> {
         self.qdrant.health_check().await?;
         Ok(())
-    }
-
-    pub fn embed(&self, sequence: &str) -> anyhow::Result<Embedding> {
-        let tokenizer_output = self.tokenizer.encode(sequence, true).unwrap();
-
-        let input_ids = tokenizer_output.get_ids();
-        let attention_mask = tokenizer_output.get_attention_mask();
-        let token_type_ids = tokenizer_output.get_type_ids();
-        let length = input_ids.len();
-        trace!("embedding {} tokens {:?}", length, sequence);
-
-        let inputs_ids_array = ndarray::Array::from_shape_vec(
-            (1, length),
-            input_ids.iter().map(|&x| x as i64).collect(),
-        )?;
-
-        let attention_mask_array = ndarray::Array::from_shape_vec(
-            (1, length),
-            attention_mask.iter().map(|&x| x as i64).collect(),
-        )?;
-
-        let token_type_ids_array = ndarray::Array::from_shape_vec(
-            (1, length),
-            token_type_ids.iter().map(|&x| x as i64).collect(),
-        )?;
-
-        let outputs = self.session.run([
-            InputTensor::from_array(inputs_ids_array.into_dyn()),
-            InputTensor::from_array(attention_mask_array.into_dyn()),
-            InputTensor::from_array(token_type_ids_array.into_dyn()),
-        ])?;
-
-        let output_tensor: OrtOwnedTensor<f32, _> = outputs[0].try_extract().unwrap();
-        let sequence_embedding = &*output_tensor.view();
-        let pooled = sequence_embedding.mean_axis(Axis(1)).unwrap();
-        Ok(pooled.to_owned().as_slice().unwrap().to_vec())
     }
 
     pub async fn search_with<'a>(
@@ -426,7 +394,7 @@ impl Semantic {
         let Some(query) = parsed_query.target() else {
             anyhow::bail!("no search target for query");
         };
-        let vector = self.embed(&query)?;
+        let vector = self.embedder.embed(&query)?;
 
         // TODO: Remove the need for `retrieve_more`. It's here because:
         // In /q `limit` is the maximum number of results returned (the actual number will often be lower due to deduplication)
@@ -462,7 +430,7 @@ impl Semantic {
 
         let vectors = parsed_queries
             .iter()
-            .map(|q| self.embed(&q.target().unwrap()))
+            .map(|q| self.embedder.embed(&q.target().unwrap()))
             .collect::<anyhow::Result<Vec<_>>>()?;
 
         tracing::trace!(?parsed_queries, "performing qdrant batch search");
@@ -491,40 +459,36 @@ impl Semantic {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[tracing::instrument(skip(self, repo_name, buffer, chunk_cache))]
-    pub async fn insert_points_for_buffer(
-        &self,
-        repo_name: &str,
-        repo_ref: &str,
-        relative_path: &str,
-        buffer: &str,
-        lang_str: &str,
-        branches: &[String],
-        chunk_cache: crate::cache::ChunkCache<'_>,
-    ) {
+    #[tracing::instrument(skip(self, repo_name, buffer))]
+    pub fn chunks_for_buffer<'a>(
+        &'a self,
+        file_cache_key: String,
+        repo_name: &'a str,
+        repo_ref: &'a str,
+        relative_path: &'a str,
+        buffer: &'a str,
+        lang_str: &'a str,
+        branches: &'a [String],
+    ) -> impl ParallelIterator<Item = (String, Payload)> + 'a {
         const MIN_CHUNK_TOKENS: usize = 50;
 
         let chunks = chunk::by_tokens(
             repo_name,
             relative_path,
             buffer,
-            &self.tokenizer,
+            self.embedder.tokenizer(),
             MIN_CHUNK_TOKENS..self.config.max_chunk_tokens,
             chunk::OverlapStrategy::default(),
         );
         debug!(chunk_count = chunks.len(), "found chunks");
 
-        let embedder = |c: &str| {
-            debug!("generating embedding");
-            self.embed(c)
-        };
-        chunks.par_iter().for_each(|chunk| {
-            let data = format!("{repo_name}\t{relative_path}\n{}", chunk.data,);
+        chunks.into_par_iter().map(move |chunk| {
+            let data = format!("{repo_name}\t{relative_path}\n{}", chunk.data);
             let payload = Payload {
                 repo_name: repo_name.to_owned(),
                 repo_ref: repo_ref.to_owned(),
                 relative_path: relative_path.to_owned(),
-                content_hash: chunk_cache.file_hash(),
+                content_hash: file_cache_key.to_string(),
                 text: chunk.data.to_owned(),
                 lang: lang_str.to_ascii_lowercase(),
                 branches: branches.to_owned(),
@@ -535,26 +499,8 @@ impl Semantic {
                 ..Default::default()
             };
 
-            let cached = chunk_cache.update_or_embed(&data, embedder, payload);
-            if let Err(err) = cached {
-                warn!(?err, %repo_name, %relative_path, "embedding failed");
-            }
-        });
-
-        match chunk_cache
-            .commit(&self.qdrant, &self.config.collection_name)
-            .await
-        {
-            Ok((new, updated, deleted)) => {
-                info!(
-                    repo_name,
-                    relative_path, new, updated, deleted, "Successful commit"
-                )
-            }
-            Err(err) => {
-                warn!(repo_name, relative_path, ?err, "Failed to upsert vectors")
-            }
-        }
+            (data, payload)
+        })
     }
 
     pub async fn delete_points_for_hash(

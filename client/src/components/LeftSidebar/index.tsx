@@ -1,5 +1,5 @@
 import { memo } from 'react';
-import { RenderPage } from '../../pages';
+import { RenderPage } from '../../pages/RepoTab/Content';
 import IdeNavigation from '../IdeNavigation';
 import Filters from '../Filters';
 
@@ -9,7 +9,7 @@ type Props = {
 
 const LeftSidebar = ({ renderPage }: Props) => {
   return (
-    <div className="h-full overflow-auto">
+    <div className="h-full overflow-auto bg-bg-base">
       {renderPage === 'full-result' ? <IdeNavigation /> : <Filters />}
     </div>
   );

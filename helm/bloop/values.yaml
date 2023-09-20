@@ -13,6 +13,8 @@ bloop:
   githubClientSecret: ""
   instanceDomain: ""
   answerApiUrl: ""
+  embeddingServerUrl: ""
+  embeddingBatchSize: ""
   analyticsKey: ""
   analyticsKeyFE: ""
   analyticsDataPlane: ""

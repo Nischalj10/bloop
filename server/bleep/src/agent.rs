@@ -1,9 +1,9 @@
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use anyhow::{anyhow, Context, Result};
-use futures::TryStreamExt;
+use futures::{Future, TryStreamExt};
 use tokio::sync::mpsc::Sender;
-use tracing::{debug, info, instrument};
+use tracing::{debug, error, info, instrument};
 
 use crate::{
     analytics::{EventData, QueryEvent},
@@ -12,15 +12,19 @@ use crate::{
     query::parser,
     repo::RepoRef,
     semantic,
-    webserver::middleware::User,
+    webserver::{
+        answer::conversations::{self, ConversationId},
+        middleware::User,
+    },
     Application,
 };
 
 use self::exchange::{Exchange, SearchStep, Update};
 
 pub mod exchange;
-mod prompts;
-mod transcoder;
+pub mod model;
+pub mod prompts;
+pub mod transcoder;
 
 /// A collection of modules that each add methods to `Agent`.
 ///
@@ -33,8 +37,6 @@ mod tools {
     pub mod path;
     pub mod proc;
 }
-
-const ANSWER_MODEL: &str = "gpt-4-0613";
 
 pub enum Error {
     Timeout(Duration),
@@ -52,10 +54,18 @@ pub struct Agent {
     pub thread_id: uuid::Uuid,
     pub query_id: uuid::Uuid,
 
+    pub model: model::AnswerModel,
+
     /// Indicate whether the request was answered.
     ///
     /// This is used in the `Drop` handler, in order to track cancelled answer queries.
-    pub complete: bool,
+    pub exchange_state: ExchangeState,
+}
+
+pub enum ExchangeState {
+    Pending,
+    Complete,
+    Failed,
 }
 
 /// We use a `Drop` implementation to track agent query cancellation.
@@ -68,20 +78,35 @@ pub struct Agent {
 /// `.complete()` will "diffuse" tracking, and disable the cancellation message from sending on drop.
 impl Drop for Agent {
     fn drop(&mut self) {
-        if !self.complete {
-            self.track_query(
-                EventData::output_stage("cancelled")
-                    .with_payload("message", "request was cancelled"),
-            );
+        match self.exchange_state {
+            ExchangeState::Failed => {}
+            ExchangeState::Pending => {
+                self.last_exchange_mut().apply_update(Update::Cancel);
+
+                self.track_query(
+                    EventData::output_stage("cancelled")
+                        .with_payload("message", "request was cancelled"),
+                );
+
+                tokio::spawn(self.store());
+            }
+
+            ExchangeState::Complete => {
+                tokio::spawn(self.store());
+            }
         }
     }
 }
 
 impl Agent {
     /// Complete this agent, preventing an analytics message from sending on drop.
-    pub fn complete(mut self) {
+    pub fn complete(&mut self, success: bool) {
         // Checked in `Drop::drop`
-        self.complete = true;
+        self.exchange_state = if success {
+            ExchangeState::Complete
+        } else {
+            ExchangeState::Failed
+        };
     }
 
     /// Update the last exchange
@@ -166,11 +191,14 @@ impl Agent {
         ))];
         history.extend(self.history()?);
 
-        let trimmed_history = trim_history(history.clone())?;
+        let trimmed_history = trim_history(history.clone(), self.model)?;
 
         let raw_response = self
             .llm_gateway
-            .chat(&trim_history(history.clone())?, Some(&functions))
+            .chat(
+                &trim_history(history.clone(), self.model)?,
+                Some(&functions),
+            )
             .await?
             .try_fold(
                 llm_gateway::api::FunctionCall::default(),
@@ -354,17 +382,49 @@ impl Agent {
             .fuzzy_path_match(&self.repo_ref, query, branch.as_deref(), 50)
             .await
     }
+
+    /// Store the conversation in the DB.
+    ///
+    /// This allows us to make subsequent requests.
+    // NB: This isn't an `async fn` so as to not capture a lifetime.
+    fn store(&mut self) -> impl Future<Output = ()> {
+        let sql = Arc::clone(&self.app.sql);
+        let conversation = (self.repo_ref.clone(), self.exchanges.clone());
+        let conversation_id = self
+            .user
+            .login()
+            .context("didn't have user ID")
+            .map(|user_id| ConversationId {
+                thread_id: self.thread_id,
+                user_id: user_id.to_owned(),
+            });
+
+        async move {
+            let result = match conversation_id {
+                Ok(conversation_id) => {
+                    conversations::store(&sql, conversation_id, conversation).await
+                }
+                Err(e) => Err(e),
+            };
+
+            if let Err(e) = result {
+                error!("failed to store conversation: {e}");
+            }
+        }
+    }
 }
 
 fn trim_history(
     mut history: Vec<llm_gateway::api::Message>,
+    model: model::AnswerModel,
 ) -> Result<Vec<llm_gateway::api::Message>> {
-    const HEADROOM: usize = 2048;
     const HIDDEN: &str = "[HIDDEN]";
 
     let mut tiktoken_msgs = history.iter().map(|m| m.into()).collect::<Vec<_>>();
 
-    while tiktoken_rs::get_chat_completion_max_tokens(ANSWER_MODEL, &tiktoken_msgs)? < HEADROOM {
+    while tiktoken_rs::get_chat_completion_max_tokens(model.tokenizer, &tiktoken_msgs)?
+        < model.history_headroom
+    {
         let _ = history
             .iter_mut()
             .zip(tiktoken_msgs.iter_mut())
@@ -471,7 +531,7 @@ mod tests {
         ];
 
         assert_eq!(
-            trim_history(history).unwrap(),
+            trim_history(history, model::GPT_4).unwrap(),
             vec![
                 llm_gateway::api::Message::system("foo"),
                 llm_gateway::api::Message::user("bar"),

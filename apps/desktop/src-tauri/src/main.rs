@@ -6,11 +6,15 @@
 mod backend;
 mod qdrant;
 
+use once_cell::sync::Lazy;
 pub use tauri::{plugin, App, Manager, Runtime};
 
-use std::{path::PathBuf, sync::RwLock};
+use std::{
+    path::PathBuf,
+    sync::{Arc, RwLock},
+};
 
-pub static TELEMETRY: RwLock<bool> = RwLock::new(false);
+pub static TELEMETRY: Lazy<Arc<RwLock<bool>>> = Lazy::new(|| Arc::new(RwLock::new(false)));
 
 // the payload type must implement `Serialize` and `Clone`.
 #[derive(Clone, serde::Serialize)]
@@ -61,6 +65,8 @@ fn disable_telemetry() {
 
 #[tauri::command]
 fn show_folder_in_finder(path: String) {
+    let path = PathBuf::from(path).canonicalize().unwrap();
+
     #[cfg(target_os = "macos")]
     {
         std::process::Command::new("open")

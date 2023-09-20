@@ -34,7 +34,7 @@ export type Form = {
   emailError: string | null;
 };
 
-const Onboarding = () => {
+const Onboarding = ({ activeTab }: { activeTab: string }) => {
   const { t } = useTranslation();
   const [form, setForm] = useState<Form>({
     firstName: '',
@@ -50,7 +50,6 @@ const Onboarding = () => {
   const { isGithubConnected } = useContext(UIContext.GitHubConnected);
   const { isSelfServe, os, setEnvConfig, envConfig } =
     useContext(DeviceContext);
-  const [isJustUpdated, setJustUpdated] = useState(false);
 
   const closeOnboarding = useCallback(() => {
     setShouldShowWelcome(false);
@@ -85,7 +84,6 @@ const Onboarding = () => {
         .then((d) => {
           setEnvConfig(d);
           if (!d.user_login) {
-            setJustUpdated(d.credentials_upgrade);
             setShouldShowWelcome(true);
           } else {
             closeOnboarding();
@@ -101,17 +99,16 @@ const Onboarding = () => {
     let intervalId: number;
     let timerId: number;
     if (isGithubConnected && !envConfig.github_user?.login) {
-      intervalId = window.setInterval(
-        () =>
-          getConfig().then((resp) => {
-            setEnvConfig(resp);
-            if (resp.github_user?.login) {
-              clearInterval(intervalId);
-            }
-          }),
-        500,
-      );
-      timerId = window.setTimeout(() => clearInterval(intervalId), 30000);
+      intervalId = window.setInterval(() => {
+        getConfig().then((resp) => {
+          setEnvConfig((prev) =>
+            JSON.stringify(prev) === JSON.stringify(resp) ? prev : resp,
+          );
+        });
+      }, 500);
+      timerId = window.setTimeout(() => {
+        clearInterval(intervalId);
+      }, 30000);
     }
 
     return () => {
@@ -135,7 +132,7 @@ const Onboarding = () => {
   return shouldShowWelcome ? (
     isSelfServe ? (
       <div className="text-label-title">
-        <NavBar isSkeleton />
+        <NavBar isSkeleton activeTab={activeTab} />
         <div
           className={`flex justify-center items-start mt-8 w-screen overflow-auto relative h-[calc(100vh-4rem)]`}
         >
@@ -153,7 +150,7 @@ const Onboarding = () => {
       </div>
     ) : (
       <div className="fixed top-0 bottom-0 left-0 right-0 z-100 bg-bg-sub select-none">
-        {os.type === 'Darwin' && <NavBar isSkeleton />}
+        {os.type === 'Darwin' && <NavBar isSkeleton activeTab={activeTab} />}
         <img
           src="/light.png"
           alt=""
