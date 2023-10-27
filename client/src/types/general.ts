@@ -240,13 +240,18 @@ export type ChatMessageServer = {
   loadingSteps: ChatLoadingStep[];
   error?: string;
   isFromHistory?: boolean;
-  results?: string;
+  conclusion?: string;
   queryId: string;
   responseTimestamp: string;
   explainedFile?: string;
 };
 
 export type ChatMessage = ChatMessageUser | ChatMessageServer;
+
+export type OpenChatHistoryItem = {
+  conversation: ChatMessage[];
+  threadId: string;
+};
 
 export interface NavigationItem {
   type:
@@ -282,6 +287,7 @@ export type EnvConfig = {
   };
   bloop_user_profile?: {
     prompt_guide?: string;
+    allow_session_recordings?: boolean;
   };
   credentials_upgrade?: boolean;
 };

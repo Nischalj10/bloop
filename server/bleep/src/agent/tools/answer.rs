@@ -8,11 +8,13 @@ use tracing::{debug, info, instrument, trace};
 use crate::{
     agent::{
         exchange::{CodeChunk, FocusedChunk, Update},
-        model, prompts, transcoder, Agent,
+        model, transcoder, Agent,
     },
     analytics::EventData,
     llm_gateway,
 };
+
+const CHUNK_MERGE_DISTANCE: usize = 20;
 
 impl Agent {
     #[instrument(skip(self))]
@@ -39,7 +41,7 @@ impl Agent {
         }
 
         let context = self.answer_context(aliases).await?;
-        let system_prompt = prompts::answer_article_prompt(aliases.len() != 1, &context);
+        let system_prompt = (self.model.system_prompt)(&context);
         let system_message = llm_gateway::api::Message::system(&system_prompt);
         let history = {
             let h = self.utter_history().collect::<Vec<_>>();
@@ -59,7 +61,12 @@ impl Agent {
             self.llm_gateway
                 .clone()
                 .model(self.model.model_name)
-                .chat(&messages, None)
+                .frequency_penalty(if self.model.model_name == "gpt-3.5-turbo-finetuned" {
+                    Some(0.2)
+                } else {
+                    Some(0.0)
+                })
+                .chat_stream(&messages, None)
                 .await?
         );
 
@@ -221,10 +228,7 @@ impl Agent {
                     }
                 });
 
-                query
-                    .into_iter()
-                    .chain(conclusion.into_iter())
-                    .collect::<Vec<_>>()
+                query.into_iter().chain(conclusion).collect::<Vec<_>>()
             })
     }
 
@@ -254,6 +258,16 @@ impl Agent {
                 .entry(c.path.clone())
                 .or_default()
                 .push(c.start_line..c.end_line);
+        }
+
+        // If there are no relevant code chunks, but there is a focused chunk, we use that.
+        if spans_by_path.is_empty() {
+            if let Some(chunk) = &self.last_exchange().focused_chunk {
+                spans_by_path
+                    .entry(chunk.file_path.clone())
+                    .or_default()
+                    .push(chunk.start_line..chunk.end_line);
+            }
         }
 
         debug!(?spans_by_path, "expanding spans");
@@ -355,7 +369,7 @@ impl Agent {
 
         debug!(?spans_by_path, "expanded spans");
 
-        spans_by_path
+        let code_chunks = spans_by_path
             .into_iter()
             .flat_map(|(path, spans)| spans.into_iter().map(move |s| (path.clone(), s)))
             .map(|(path, span)| {
@@ -369,7 +383,24 @@ impl Agent {
                     end_line: span.end,
                 }
             })
-            .collect()
+            .collect::<Vec<CodeChunk>>();
+
+        // Handle case where there is only one code chunk and it exceeds `max_tokens`.
+        // In this instance we trim the chunk to fit within the limit.
+        if code_chunks.len() == 1 {
+            let chunk = code_chunks.first().unwrap();
+            let trimmed_snippet = transcoder::limit_tokens(&chunk.snippet, bpe, max_tokens);
+            let num_trimmed_lines = trimmed_snippet.lines().count();
+            vec![CodeChunk {
+                alias: chunk.alias,
+                path: chunk.path.clone(),
+                snippet: trimmed_snippet.to_string(),
+                start_line: chunk.start_line,
+                end_line: (chunk.start_line + num_trimmed_lines).saturating_sub(1),
+            }]
+        } else {
+            code_chunks
+        }
     }
 }
 
@@ -395,12 +426,12 @@ fn trim_utter_history(
     Ok(history)
 }
 
-/// Merge line ranges if they overlap.
+/// Merge line ranges if they overlap or are nearby.
 ///
 /// This function assumes that the first parameter is a line range which starts *before* the line
 /// range given by the second parameter.
 fn merge_overlapping(a: &mut Range<usize>, b: Range<usize>) -> Option<Range<usize>> {
-    if a.end >= b.start {
+    if a.end + CHUNK_MERGE_DISTANCE >= b.start {
         // `b` might be contained in `a`, which allows us to discard it.
         if a.end < b.end {
             a.end = b.end;

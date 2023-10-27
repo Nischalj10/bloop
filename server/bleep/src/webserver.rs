@@ -1,6 +1,7 @@
 use crate::{env::Feature, Application};
 
 use axum::{
+    extract::State,
     http::StatusCode,
     response::IntoResponse,
     routing::{delete, get, post},
@@ -12,9 +13,10 @@ use tower_http::services::{ServeDir, ServeFile};
 use tower_http::{catch_panic::CatchPanicLayer, cors::CorsLayer};
 use tracing::info;
 
-mod aaa;
+pub mod aaa;
 pub mod answer;
 mod autocomplete;
+mod commits;
 mod config;
 mod file;
 mod github;
@@ -54,6 +56,7 @@ pub async fn start(app: Application) -> anyhow::Result<()> {
         // repo management
         .nest("/repos", repos::router())
         // intelligence
+        .route("/tutorial-questions", get(commits::tutorial_questions))
         .route("/hoverable", get(hoverable::handle))
         .route("/token-info", get(intelligence::handle))
         .route("/related-files", get(intelligence::related_files))
@@ -112,10 +115,10 @@ pub async fn start(app: Application) -> anyhow::Result<()> {
         api = api.route("/repos/scan", get(repos::scan_local));
     }
 
-    if app.env.allow(Feature::CognitoUserAuth) {
+    if app.env.allow(Feature::DesktopUserAuth) {
         api = api
-            .route("/remotes/github/login", get(github::login))
-            .route("/remotes/github/logout", get(github::logout));
+            .route("/auth/login", get(github::login))
+            .route("/auth/logout", get(github::logout));
     }
 
     api = api.route("/panic", get(|| async { panic!("dead") }));
@@ -123,7 +126,7 @@ pub async fn start(app: Application) -> anyhow::Result<()> {
     // Note: all routes above this point must be authenticated.
     // These middlewares MUST provide the `middleware::User` extension.
     if app.env.allow(Feature::AuthorizationRequired) {
-        api = aaa::router(middleware::sentry_layer(api), app.clone());
+        api = aaa::router(middleware::sentry_layer(api), app.clone()).await;
     } else {
         api = middleware::local_user(middleware::sentry_layer(api), app.clone());
     }
@@ -325,10 +328,8 @@ impl<'a> From<EndpointError<'a>> for Response<'a> {
     }
 }
 
-async fn health(Extension(app): Extension<Application>) {
-    if let Some(ref semantic) = app.semantic {
-        // panic is fine here, we don't need exact reporting of
-        // subsystem checks at this stage
-        semantic.health_check().await.unwrap()
-    }
+async fn health(State(app): State<Application>) {
+    // panic is fine here, we don't need exact reporting of
+    // subsystem checks at this stage
+    app.semantic.health_check().await.unwrap()
 }

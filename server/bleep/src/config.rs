@@ -8,6 +8,7 @@ use std::{
     num::NonZeroUsize,
     path::{Path, PathBuf},
 };
+use uuid::Uuid;
 
 #[derive(Serialize, Deserialize, Parser, Debug, Clone)]
 #[clap(author, version, about, long_about = None)]
@@ -111,9 +112,10 @@ pub struct Configuration {
     //
     // Semantic values
     //
-    #[clap(long)]
+    #[clap(long, default_value_t = default_qdrant_url())]
+    #[serde(default = "default_qdrant_url")]
     /// URL for the qdrant server
-    pub qdrant_url: Option<String>,
+    pub qdrant_url: String,
 
     #[clap(long, default_value_os_t = default_model_dir())]
     #[serde(default = "default_model_dir")]
@@ -139,41 +141,35 @@ pub struct Configuration {
     // Cognito setup
     //
     /// Cognito userpool_id
+    #[clap(long)]
     pub cognito_userpool_id: Option<String>,
 
     /// Cognito client_id
+    #[clap(long)]
     pub cognito_client_id: Option<String>,
 
     /// Entry point to the Cognito authentication flow
-    pub cognito_auth_url: Option<String>,
+    #[clap(long)]
+    pub cognito_auth_url: Option<reqwest::Url>,
 
     /// Auth management base URL
-    pub cognito_mgmt_url: Option<String>,
+    #[clap(long)]
+    pub cognito_mgmt_url: Option<reqwest::Url>,
+
+    /// URL from which to initialize Cognito configuration
+    #[clap(long)]
+    pub cognito_config_url: Option<reqwest::Url>,
 
     //
-    // Installation-specific values
+    // Cloud-based Github App installation-specific values
     //
+    /// Instance-specific shared secret between bloop c&c & instance
     #[clap(long)]
-    #[serde(serialize_with = "serialize_secret_opt_str", default)]
-    /// Github Client ID for GitHub Apps
-    pub github_client_id: Option<SecretString>,
+    pub bloop_instance_secret: Option<Uuid>,
 
-    // Github client secret
+    /// Instance organization name
     #[clap(long)]
-    #[serde(serialize_with = "serialize_secret_opt_str", default)]
-    pub github_client_secret: Option<SecretString>,
-
-    #[clap(long)]
-    /// GitHub App ID
-    pub github_app_id: Option<u64>,
-
-    #[clap(long)]
-    /// GitHub App installation ID
-    pub github_app_install_id: Option<u64>,
-
-    #[clap(long)]
-    /// Path to a GitHub private key file, for signing access token requests
-    pub github_app_private_key: Option<PathBuf>,
+    pub bloop_instance_org: Option<String>,
 
     #[clap(long)]
     #[serde(serialize_with = "serialize_secret_opt_str", default)]
@@ -206,6 +202,14 @@ macro_rules! right_if_default {
     };
 }
 
+#[derive(Deserialize)]
+struct RemoteConfig {
+    auth_url: reqwest::Url,
+    mgmt_url: reqwest::Url,
+    client_id: String,
+    userpool_id: String,
+}
+
 impl Configuration {
     pub fn read(file: impl AsRef<Path>) -> Result<Self> {
         let file = std::fs::File::open(file)?;
@@ -220,24 +224,34 @@ impl Configuration {
         self.index_dir.join(name)
     }
 
-    pub fn github_client_id_and_secret(&self) -> Option<(&str, &str)> {
-        let id = self.github_client_id.as_ref()?.expose_secret();
-        let secret = self.github_client_secret.as_ref()?.expose_secret();
-        Some((id, secret))
-    }
-
     pub fn cli_overriding_config_file() -> Result<Self> {
         let cli = Self::from_cli()?;
         let Ok(file) = cli
             .config_file
             .as_ref()
             .context("no config file specified")
-            .and_then(Self::read) else
-        {
+            .and_then(Self::read)
+        else {
             return Ok(cli);
         };
 
         Ok(Self::merge(file, cli))
+    }
+
+    pub async fn with_remote_cognito_config(mut self) -> Result<Self> {
+        let url = self
+            .cognito_config_url
+            .clone()
+            .context("Invalid config, cognito_config_url missing")?;
+
+        let config: RemoteConfig = reqwest::get(url).await?.json().await?;
+
+        self.cognito_auth_url = Some(config.auth_url);
+        self.cognito_mgmt_url = Some(config.mgmt_url);
+        self.cognito_client_id = Some(config.client_id);
+        self.cognito_userpool_id = Some(config.userpool_id);
+
+        Ok(self)
     }
 
     /// Merge 2 configurations with values from `b` taking precedence
@@ -301,7 +315,7 @@ impl Configuration {
 
             frontend_dist: b.frontend_dist.or(a.frontend_dist),
 
-            qdrant_url: b.qdrant_url.or(a.qdrant_url),
+            qdrant_url: right_if_default!(b.qdrant_url, a.qdrant_url, String::new()),
 
             answer_api_url: right_if_default!(
                 b.answer_api_url,
@@ -317,15 +331,11 @@ impl Configuration {
 
             cognito_mgmt_url: b.cognito_mgmt_url.or(a.cognito_mgmt_url),
 
-            github_client_id: b.github_client_id.or(a.github_client_id),
+            cognito_config_url: b.cognito_config_url.or(a.cognito_config_url),
 
-            github_client_secret: b.github_client_secret.or(a.github_client_secret),
+            bloop_instance_secret: b.bloop_instance_secret.or(a.bloop_instance_secret),
 
-            github_app_id: b.github_app_id.or(a.github_app_id),
-
-            github_app_install_id: b.github_app_install_id.or(a.github_app_install_id),
-
-            github_app_private_key: b.github_app_private_key.or(a.github_app_private_key),
+            bloop_instance_org: b.bloop_instance_org.or(a.bloop_instance_org),
 
             instance_domain: b.instance_domain.or(a.instance_domain),
 
@@ -410,6 +420,10 @@ const fn default_port() -> u16 {
 
 fn default_host() -> String {
     String::from("127.0.0.1")
+}
+
+fn default_qdrant_url() -> String {
+    String::from("http://127.0.0.1:6334")
 }
 
 fn default_answer_api_url() -> String {

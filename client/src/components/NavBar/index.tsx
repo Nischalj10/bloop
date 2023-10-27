@@ -1,23 +1,14 @@
 import React, { memo, useCallback, useContext, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import {
-  Bug,
-  Card,
-  Cog,
-  DoorRight,
-  Magazine,
-  Person,
-  Sparkle,
-} from '../../icons';
+import { AnimatePresence, Reorder } from 'framer-motion';
+import { Bug, Card, Cog, DoorRight, Home, Magazine, Person } from '../../icons';
 import { ContextMenuItem, MenuListItemType } from '../ContextMenu';
 import { deleteAuthCookie } from '../../utils';
 import DropdownWithIcon from '../Dropdown/WithIcon';
 import { UIContext } from '../../context/uiContext';
 import { DeviceContext } from '../../context/deviceContext';
 import { TabsContext } from '../../context/tabsContext';
-import { getSubscriptionLink, gitHubLogout } from '../../services/api';
-import { RepoSource } from '../../types';
-import { TabType } from '../../types/general';
+import { getSubscriptionLink, githubLogout } from '../../services/api';
 import { PersonalQuotaContext } from '../../context/personalQuotaContext';
 import LiteLoaderContainer from '../Loaders/LiteLoader';
 import Tab from './Tab';
@@ -35,14 +26,21 @@ const NavBar = ({ isSkeleton, activeTab }: Props) => {
   const { setGithubConnected } = useContext(UIContext.GitHubConnected);
   const { isSubscribed } = useContext(PersonalQuotaContext.Values);
   const { openLink, isSelfServe, os, envConfig } = useContext(DeviceContext);
-  const { tabs } = useContext(TabsContext);
+  const { tabs, handleReorderTabs, setActiveTab } = useContext(TabsContext);
   const [isFetchingLink, setIsFetchingLink] = useState(false);
 
   const handleUpgrade = useCallback(() => {
     setIsFetchingLink(true);
     getSubscriptionLink()
       .then((resp) => {
-        openLink(resp.url);
+        if (resp.url) {
+          openLink(resp.url);
+        } else {
+          setBugReportModalOpen(true);
+        }
+      })
+      .catch(() => {
+        setBugReportModalOpen(true);
       })
       .finally(() => setIsFetchingLink(false));
   }, [openLink]);
@@ -90,54 +88,56 @@ const NavBar = ({ isSkeleton, activeTab }: Props) => {
           deleteAuthCookie();
           setGithubConnected(false);
           if (!isSelfServe) {
-            gitHubLogout();
+            githubLogout();
           }
         },
       },
     ] as ContextMenuItem[];
-  }, [
-    isSelfServe,
-    openLink,
-    gitHubLogout,
-    t,
-    isSubscribed,
-    handleUpgrade,
-    isFetchingLink,
-  ]);
+  }, [isSelfServe, openLink, t, isSubscribed, handleUpgrade, isFetchingLink]);
+
+  const tabsWithoutHome = useMemo(() => {
+    return tabs.slice(1);
+  }, [tabs]);
 
   return (
     <div
-      className={`h-8 flex items-center px-8 bg-bg-base fixed top-0 left-0 right-0 z-80
-       border-b border-bg-border backdrop-blur-8 select-none`}
+      className={`h-8 flex items-stretch px-8 bg-bg-base fixed top-0 left-0 right-0 z-80
+       border-b border-bg-border backdrop-blur-8 select-none overflow-hidden`}
       data-tauri-drag-region
     >
       {os.type === 'Darwin' ? <span className="w-14" /> : ''}
-      <Tab
-        tabKey="initial"
-        name="Home"
-        key="initial"
-        source={RepoSource.LOCAL}
-        activeTab={activeTab}
-      />
+      <button
+        onClick={() => setActiveTab('initial')}
+        className={`border-x px-3 border-bg-border flex items-center justify-center ${
+          activeTab === 'initial'
+            ? 'bg-bg-shade text-label-title'
+            : 'bg-bg-base text-label-base'
+        } cursor-pointer`}
+      >
+        <Home sizeClassName="w-4 h-4" />
+      </button>
       <div
-        className={`flex-1 flex items-center justify-start h-full overflow-x-auto pb-1 -mb-1 pr-6 fade-right`}
+        className={`flex flex-1 overflow-auto fade-right`}
         data-tauri-drag-region
       >
-        {!isSkeleton &&
-          tabs
-            .slice(1)
-            .map((t) => (
-              <Tab
-                tabKey={t.key}
-                name={t.name}
-                key={t.key}
-                source={t.type === TabType.REPO ? t.source : undefined}
-                activeTab={activeTab}
-              />
-            ))}
+        <Reorder.Group
+          as="ul"
+          axis="x"
+          onReorder={handleReorderTabs}
+          className="flex items-center justify-start h-full overflow-x-auto pr-8"
+          values={tabsWithoutHome}
+          layoutScroll
+        >
+          <AnimatePresence initial={false}>
+            {!isSkeleton &&
+              tabsWithoutHome.map((t) => (
+                <Tab key={t.key} item={t} activeTab={activeTab} />
+              ))}
+          </AnimatePresence>
+        </Reorder.Group>
       </div>
       {!isSkeleton && (
-        <div>
+        <div className="flex items-center justify-center ml-3">
           <DropdownWithIcon
             items={dropdownItems}
             icon={
@@ -152,6 +152,7 @@ const NavBar = ({ isSkeleton, activeTab }: Props) => {
             dropdownBtnClassName="-mr-4"
             btnSize="tiny"
             btnVariant="tertiary"
+            appendTo={document.body}
           />
         </div>
       )}

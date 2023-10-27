@@ -18,6 +18,7 @@ pub(super) struct ConfigResponse {
     bloop_version: String,
     bloop_commit: String,
     credentials_upgrade: bool,
+    paid: bool,
 }
 
 impl super::ApiResponse for ConfigResponse {}
@@ -26,10 +27,17 @@ pub(super) async fn get(
     State(app): State<Application>,
     Extension(user): Extension<User>,
 ) -> impl IntoResponse {
+    let user_profile = user
+        .username()
+        .and_then(|login| app.user_profiles.read(login, |_, v| v.clone()))
+        .unwrap_or_default();
+
+    let user_login = user.username().map(str::to_owned);
+
     let tracking_id = app
         .analytics
         .as_ref()
-        .map(|a| a.tracking_id(user.login()))
+        .map(|a| a.tracking_id(user_login.as_deref()))
         .unwrap_or_default();
 
     let device_id = app
@@ -44,28 +52,24 @@ pub(super) async fn get(
     });
 
     let github_user = 'user: {
-        let Some(crab) = user.github()
-	else {
+        let (Some(login), Some(crab)) = (&user_login, user.github_client()) else {
             break 'user None;
         };
-        crab.current().user().await.ok()
-    };
 
-    let user_profile = user
-        .login()
-        .and_then(|login| app.user_profiles.read(login, |_, v| v.clone()))
-        .unwrap_or_default();
+        crab.get(format!("/users/{login}"), None::<&()>).await.ok()
+    };
 
     json(ConfigResponse {
         analytics_data_plane: app.config.analytics_data_plane.clone(),
         analytics_key_fe: app.config.analytics_key_fe.clone(),
         sentry_dsn_fe: app.config.sentry_dsn_fe.clone(),
-        user_login: user.login().map(str::to_owned),
         schema_version: crate::state::SCHEMA_VERSION.into(),
         bloop_version: env!("CARGO_PKG_VERSION").into(),
         bloop_commit: git_version::git_version!(fallback = "unknown").into(),
         bloop_user_profile: user_profile,
         credentials_upgrade: app.config.source.exists("credentials.json"),
+        paid: user.paid_features(&app).await,
+        user_login,
         github_user,
         device_id,
         org_name,
@@ -83,7 +87,7 @@ pub(super) async fn put(
     Extension(user): Extension<User>,
     Json(update): Json<ConfigUpdate>,
 ) -> impl IntoResponse {
-    let user = user.login().expect("authentication required").to_owned();
+    let user = user.username().expect("authentication required").to_owned();
     app.user_profiles
         .entry_async(user)
         .await

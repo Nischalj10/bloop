@@ -17,6 +17,7 @@ type Props = {
   isPreviewing: boolean;
   hasContextError: boolean;
   isActiveTab: boolean;
+  isChangeUnsaved: boolean;
 };
 
 const RightPanel = ({
@@ -30,6 +31,7 @@ const RightPanel = ({
   handleRestore,
   hasContextError,
   isActiveTab,
+  isChangeUnsaved,
 }: Props) => {
   useTranslation();
   return (
@@ -59,11 +61,13 @@ const RightPanel = ({
         studioId={studioId}
         messages={messages}
         refetchCodeStudio={refetchCodeStudio}
-        isTokenLimitExceeded={tokensTotal > TOKEN_LIMIT || hasContextError}
+        isTokenLimitExceeded={tokensTotal > TOKEN_LIMIT}
+        hasContextError={hasContextError}
         setIsHistoryOpen={setIsHistoryOpen}
         isPreviewing={isPreviewing}
         handleRestore={handleRestore}
         isActiveTab={isActiveTab}
+        isChangeUnsaved={isChangeUnsaved}
       />
     </>
   );

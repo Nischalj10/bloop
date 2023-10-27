@@ -48,13 +48,17 @@ import ErrorFallback from './components/ErrorFallback';
 import { PersonalQuotaContextProvider } from './context/providers/PersonalQuotaContextProvider';
 import UpgradePopup from './components/UpgradePopup';
 import StudioGuidePopup from './components/StudioGuidePopup';
+import WaitingUpgradePopup from './components/UpgradePopup/WaitingUpgradePopup';
+import { polling } from './utils/requestUtils';
 
 type Props = {
   deviceContextValue: DeviceContextType;
 };
 
 function App({ deviceContextValue }: Props) {
-  useComponentWillMount(() => initApi(deviceContextValue.apiUrl));
+  useComponentWillMount(() =>
+    initApi(deviceContextValue.apiUrl, deviceContextValue.isSelfServe),
+  );
 
   const [tabs, setTabs] = useState<UITabType[]>([
     {
@@ -121,7 +125,7 @@ function App({ deviceContextValue }: Props) {
 
   const handleAddStudioTab = useCallback((name: string, id: string) => {
     const newTab: StudioTabType = {
-      key: id,
+      key: id.toString(),
       name,
       type: TabType.STUDIO,
     };
@@ -285,6 +289,12 @@ function App({ deviceContextValue }: Props) {
     });
   }, []);
 
+  const handleReorderTabs = useCallback((newTabs: UITabType[]) => {
+    setTabs((prev) => {
+      return [prev[0], ...newTabs];
+    });
+  }, []);
+
   const contextValue = useMemo(
     () => ({
       tabs,
@@ -295,6 +305,7 @@ function App({ deviceContextValue }: Props) {
       updateTabNavHistory,
       updateTabBranch,
       updateTabName,
+      handleReorderTabs,
     }),
     [
       tabs,
@@ -304,11 +315,12 @@ function App({ deviceContextValue }: Props) {
       updateTabNavHistory,
       updateTabBranch,
       updateTabName,
+      handleReorderTabs,
     ],
   );
 
   const fetchRepos = useCallback(() => {
-    getRepos().then((data) => {
+    return getRepos().then((data) => {
       const list = data?.list?.sort((a, b) => (a.name < b.name ? -1 : 1)) || [];
       setRepositories((prev) => {
         if (JSON.stringify(prev) === JSON.stringify(list)) {
@@ -320,8 +332,7 @@ function App({ deviceContextValue }: Props) {
   }, []);
 
   useEffect(() => {
-    fetchRepos();
-    const intervalId = setInterval(fetchRepos, 5000);
+    const intervalId = polling(fetchRepos, 5000);
     return () => {
       clearInterval(intervalId);
     };
@@ -383,6 +394,7 @@ function App({ deviceContextValue }: Props) {
                 <StatusBar />
                 <CloudFeaturePopup />
                 <UpgradePopup />
+                <WaitingUpgradePopup />
               </PersonalQuotaContextProvider>
             </GeneralUiContextProvider>
           </TabsContext.Provider>

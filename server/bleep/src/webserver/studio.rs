@@ -74,7 +74,7 @@ pub async fn create(
 ) -> webserver::Result<String> {
     let mut transaction = app.sql.begin().await?;
 
-    let user_id = user.login().ok_or_else(no_user_id)?.to_string();
+    let user_id = user.username().ok_or_else(no_user_id)?.to_string();
 
     let studio_id: i64 = sqlx::query! {
         "INSERT INTO studios (user_id, name) VALUES (?, ?) RETURNING id",
@@ -155,7 +155,7 @@ pub async fn get(
     Path(id): Path<i64>,
     Query(params): Query<Get>,
 ) -> webserver::Result<Json<Studio>> {
-    let user_id = user.login().ok_or_else(no_user_id)?.to_string();
+    let user_id = user.username().ok_or_else(no_user_id)?.to_string();
 
     let snapshot_id = match params.snapshot_id {
         Some(id) => id,
@@ -204,7 +204,7 @@ pub async fn patch(
     Path(studio_id): Path<i64>,
     Json(patch): Json<Patch>,
 ) -> webserver::Result<Json<TokenCounts>> {
-    let user_id = user.login().ok_or_else(no_user_id)?.to_string();
+    let user_id = user.username().ok_or_else(no_user_id)?.to_string();
 
     let mut transaction = app.sql.begin().await?;
 
@@ -297,7 +297,7 @@ pub async fn delete(
     user: Extension<User>,
     Path(id): Path<i64>,
 ) -> webserver::Result<()> {
-    let user_id = user.login().ok_or_else(no_user_id)?.to_string();
+    let user_id = user.username().ok_or_else(no_user_id)?.to_string();
 
     sqlx::query!(
         "DELETE FROM studios WHERE id = ? AND user_id = ? RETURNING id",
@@ -323,7 +323,7 @@ pub async fn list(
     app: Extension<Application>,
     user: Extension<User>,
 ) -> webserver::Result<Json<Vec<ListItem>>> {
-    let user_id = user.login().ok_or_else(no_user_id)?.to_string();
+    let user_id = user.username().ok_or_else(no_user_id)?.to_string();
 
     let studios = sqlx::query!(
         "SELECT
@@ -391,6 +391,7 @@ pub struct TokenCounts {
     total: usize,
     messages: usize,
     per_file: Vec<Option<usize>>,
+    baseline: usize,
 }
 
 async fn token_counts(
@@ -429,15 +430,20 @@ async fn token_counts(
                 None => return Some(0),
             };
 
-            body.map(|b| count_tokens_in_file(&b, &file.ranges))
+            body.map(|b| count_tokens_for_file(&file.path, &b, &file.ranges))
         })
         .collect::<Vec<_>>();
 
+    let empty_context = generate_llm_context(app.clone(), &[]).await?;
     let empty_system_message = tiktoken_rs::ChatCompletionRequestMessage {
         role: "system".to_owned(),
-        content: prompts::studio_article_prompt(""),
+        content: prompts::studio_article_prompt(&empty_context),
         name: None,
     };
+
+    let baseline =
+        tiktoken_rs::num_tokens_from_messages(LLM_GATEWAY_MODEL, &[empty_system_message.clone()])
+            .unwrap();
 
     let tiktoken_messages = messages.iter().cloned().map(|message| match message {
         Message::User(content) => tiktoken_rs::ChatCompletionRequestMessage {
@@ -460,10 +466,20 @@ async fn token_counts(
     )
     .unwrap();
 
+    // We calculate `total` here as a summation of other calculated values here, because OpenAI's
+    // tokenization in general is contextual. Summing token counts from subsections of a string
+    // will often result in a different (and slightly larger) token count compared to counting
+    // tokens in the same string as a whole.
+    //
+    // We accept that here, and opt to always use the slightly less accurate (but larger) number
+    // for consistency.
+    let total = (messages + per_file.iter().flatten().sum::<usize>()).saturating_sub(baseline);
+
     Ok(TokenCounts {
-        total: per_file.iter().flatten().sum::<usize>() + messages,
+        total,
         messages,
         per_file,
+        baseline,
     })
 }
 
@@ -499,32 +515,53 @@ pub async fn get_file_token_count(
             )
         })?;
 
-    let token_count = count_tokens_in_file(&doc.content, &file.ranges);
+    let token_count = count_tokens_for_file(&file.path, &doc.content, &file.ranges);
 
     Ok(Json(token_count))
 }
 
-fn count_tokens_in_file(body: &str, ranges: &[Range<usize>]) -> usize {
-    let mut token_count = 0;
+fn count_tokens_for_file(path: &str, body: &str, ranges: &[Range<usize>]) -> usize {
     let core_bpe = tiktoken_rs::get_bpe_from_model("gpt-4-0613").unwrap();
 
+    let mut chunks = Vec::new();
+
     if ranges.is_empty() {
-        token_count = core_bpe.encode_ordinary(body).len();
+        let numbered_body = body
+            .lines()
+            .enumerate()
+            .map(|(i, line)| format!("{} {line}\n", i + 1))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        chunks.push(numbered_body);
     } else {
         let lines = body.lines().collect::<Vec<_>>();
         for range in ranges {
             let chunk = lines
                 .iter()
                 .copied()
+                .enumerate()
                 .skip(range.start)
                 .take(range.end - range.start)
+                .map(|(i, line)| format!("{} {line}\n", range.start + i + 1))
                 .collect::<Vec<_>>()
                 .join("\n");
-            token_count += core_bpe.encode_ordinary(&chunk).len();
+
+            chunks.push(chunk);
         }
     }
 
-    token_count
+    // Here, we build up a pseudo context in order to count tokens more accurately. This includes
+    // the path twice; once for the full path list under the `##### PATHS #####` section, and
+    // another time for the path when it is re-printed above the code chunk.
+
+    let mut pseudo_context = format!("{path}\n");
+
+    for chunk in chunks {
+        pseudo_context += &format!("### {path} ###\n{chunk}\n");
+    }
+
+    core_bpe.encode_ordinary(&pseudo_context).len()
 }
 
 pub async fn generate(
@@ -532,12 +569,13 @@ pub async fn generate(
     user: Extension<User>,
     Path(studio_id): Path<i64>,
 ) -> webserver::Result<Sse<Pin<Box<dyn tokio_stream::Stream<Item = Result<sse::Event>> + Send>>>> {
-    let user_id = user.login().ok_or_else(no_user_id)?.to_string();
+    let user_id = user.username().ok_or_else(no_user_id)?.to_string();
 
     let snapshot_id = latest_snapshot_id(studio_id, &*app.sql, &user_id).await?;
 
-    let llm_gateway = app
-        .llm_gateway_client()
+    let llm_gateway = user
+        .llm_gateway(&app)
+        .await
         .map_err(|e| Error::user(e).with_status(StatusCode::UNAUTHORIZED))?
         .quota_gated(!app.env.is_cloud_instance())
         .model(LLM_GATEWAY_MODEL)
@@ -565,13 +603,13 @@ pub async fn generate(
             .with_payload("messages", &messages),
     );
 
-    let llm_context = generate_llm_context((*app).clone(), context).await?;
+    let llm_context = generate_llm_context((*app).clone(), &context).await?;
     let system_prompt = prompts::studio_article_prompt(&llm_context);
     let llm_messages = iter::once(llm_gateway::api::Message::system(&system_prompt))
         .chain(messages.iter().map(llm_gateway::api::Message::from))
         .collect::<Vec<_>>();
 
-    let tokens = llm_gateway.chat(&llm_messages, None).await?;
+    let tokens = llm_gateway.chat_stream(&llm_messages, None).await?;
 
     let stream = async_stream::try_stream! {
         pin_mut!(tokens);
@@ -629,7 +667,8 @@ pub async fn generate(
     Ok(Sse::new(Box::pin(stream)))
 }
 
-async fn generate_llm_context(app: Application, context: Vec<ContextFile>) -> Result<String> {
+#[allow(clippy::single_range_in_vec_init)]
+async fn generate_llm_context(app: Application, context: &[ContextFile]) -> Result<String> {
     let mut s = String::new();
 
     s += "##### PATHS #####\n";
@@ -689,7 +728,7 @@ async fn populate_studio_name(
     user: Extension<User>,
     studio_id: i64,
 ) -> webserver::Result<()> {
-    let user_id = user.login().ok_or_else(no_user_id)?.to_string();
+    let user_id = user.username().ok_or_else(no_user_id)?.to_string();
 
     let snapshot_id = latest_snapshot_id(studio_id, &*app.sql, &user_id).await?;
     let needs_name = sqlx::query! {
@@ -712,8 +751,9 @@ async fn populate_studio_name(
     .await
     .map(|r| (r.context, r.messages))?;
 
-    let llm_gateway = app
-        .llm_gateway_client()
+    let llm_gateway = user
+        .llm_gateway(&app)
+        .await
         .map_err(|e| Error::user(e).with_status(StatusCode::UNAUTHORIZED))?
         .model("gpt-3.5-turbo-16k-0613")
         .temperature(0.0);
@@ -722,11 +762,7 @@ async fn populate_studio_name(
         &prompts::studio_name_prompt(&context_json, &messages_json),
     )];
 
-    let name = llm_gateway
-        .chat(messages, None)
-        .await?
-        .try_collect::<String>()
-        .await?;
+    let name = llm_gateway.chat(messages, None).await?;
 
     // Normalize studio name by removing:
     // - surrounding whitespace
@@ -753,6 +789,7 @@ pub struct Import {
 }
 
 /// Returns a new studio UUID, or the `?studio_id=...` query param if present.
+#[allow(clippy::single_range_in_vec_init)]
 pub async fn import(
     app: Extension<Application>,
     user: Extension<User>,
@@ -760,7 +797,7 @@ pub async fn import(
 ) -> webserver::Result<String> {
     let mut transaction = app.sql.begin().await?;
 
-    let user_id = user.login().ok_or_else(no_user_id)?.to_string();
+    let user_id = user.username().ok_or_else(no_user_id)?.to_string();
 
     let thread_id = params.thread_id.to_string();
 
@@ -808,8 +845,7 @@ pub async fn import(
     }))
     .collect::<Vec<_>>();
 
-    let new_context =
-        extract_relevant_chunks((*app).clone(), &exchanges, &imported_context).await?;
+    let new_context = extract_relevant_chunks(&user, &app, &exchanges, &imported_context).await?;
 
     let context = canonicalize_context(new_context.clone().into_iter().chain(old_context.clone()))
         .collect::<Vec<_>>();
@@ -862,14 +898,16 @@ pub async fn import(
 }
 
 async fn extract_relevant_chunks(
-    app: Application,
+    user: &User,
+    app: &Application,
     exchanges: &[Exchange],
     context: &[ContextFile],
 ) -> webserver::Result<Vec<ContextFile>> {
     let context_json = serde_json::to_string(&context).unwrap();
 
-    let llm_gateway = app
-        .llm_gateway_client()
+    let llm_gateway = user
+        .llm_gateway(app)
+        .await
         .map_err(|e| Error::user(e).with_status(StatusCode::UNAUTHORIZED))?
         .model(LLM_GATEWAY_MODEL)
         .temperature(0.0);
@@ -894,11 +932,8 @@ async fn extract_relevant_chunks(
     ];
 
     // Call the LLM gateway
-    let response_stream = llm_gateway.chat(&llm_messages, None).await?;
-
-    // Collect the response into a string
-    let result = response_stream
-        .try_collect()
+    let result = llm_gateway
+        .chat(&llm_messages, None)
         .await
         .and_then(|json: String| serde_json::from_str(&json).map_err(anyhow::Error::new));
 
@@ -987,7 +1022,7 @@ pub async fn list_snapshots(
     user: Extension<User>,
     Path(studio_id): Path<i64>,
 ) -> webserver::Result<Json<Vec<Snapshot>>> {
-    let user_id = user.login().ok_or_else(no_user_id)?.to_string();
+    let user_id = user.username().ok_or_else(no_user_id)?.to_string();
 
     sqlx::query! {
         "SELECT ss.id as 'id!', ss.modified_at, ss.context, ss.messages
@@ -1019,7 +1054,7 @@ pub async fn delete_snapshot(
     user: Extension<User>,
     Path((studio_id, snapshot_id)): Path<(i64, i64)>,
 ) -> webserver::Result<()> {
-    let user_id = user.login().ok_or_else(no_user_id)?.to_string();
+    let user_id = user.username().ok_or_else(no_user_id)?.to_string();
 
     sqlx::query! {
         "DELETE FROM studio_snapshots

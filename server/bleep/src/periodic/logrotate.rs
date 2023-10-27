@@ -5,7 +5,7 @@ use rand::{distributions, thread_rng, Rng};
 use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
 use tracing::{error, info};
 
-use crate::{query::parser, repo::BranchFilter, state::RepositoryPool};
+use crate::{query::parser, repo::BranchFilterConfig, state::RepositoryPool};
 
 pub(crate) async fn log_and_branch_rotate(app: crate::Application) {
     let log = crate::db::QueryLog::new(&app.sql);
@@ -74,14 +74,13 @@ fn update_branch_filters(
 ) -> Vec<crate::repo::RepoRef> {
     let mut to_sync = vec![];
     map.for_each(|repo, branches| {
-        let Ok(reporef) = repo.parse()
-        else {
+        let Ok(reporef) = repo.parse() else {
             return;
         };
 
         repo_pool.update(&reporef, |_, v| {
             let effective = std::mem::take(branches).into_iter().collect();
-            let new_filter = Some(BranchFilter::Select(effective));
+            let new_filter = Some(BranchFilterConfig::Select(effective));
             if new_filter != v.branch_filter {
                 v.branch_filter = new_filter;
                 to_sync.push(reporef.clone());

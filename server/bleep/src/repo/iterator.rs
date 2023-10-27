@@ -5,12 +5,14 @@ use regex::Regex;
 use smallvec::SmallVec;
 use tracing::warn;
 
+mod filters;
 mod fs;
 mod git;
 pub(super) mod language;
 
+pub use filters::*;
 pub use fs::FileWalker;
-pub use git::{BranchFilter, GitWalker};
+pub use git::GitWalker;
 
 use crate::background::SyncPipes;
 
@@ -20,6 +22,29 @@ pub const AVG_LINE_LEN: u64 = 30;
 pub const MAX_LINE_COUNT: u64 = 20000;
 pub const MAX_FILE_LEN: u64 = AVG_LINE_LEN * MAX_LINE_COUNT;
 
+#[rustfmt::skip]
+pub const EXT_BLACKLIST: &[&str] = &[
+    // graphics
+    "png", "jpg", "jpeg", "ico", "bmp", "bpg", "eps", "pcx", "ppm", "tga", "tiff", "wmf", "xpm",
+    "svg", "riv", "gif",
+    // fonts
+    "ttf", "woff2", "fnt", "fon", "otf",
+    // documents
+    "pdf", "ps", "doc", "dot", "docx", "dotx", "xls", "xlsx", "xlt", "odt", "ott", "ods", "ots", "dvi", "pcl",
+    // media
+    "mp3", "ogg", "ac3", "aac", "mod", "mp4", "mkv", "avi", "m4v", "mov", "flv",
+    // compiled
+    "jar", "pyc", "war", "ear",
+    // compression
+    "tar", "gz", "bz2", "xz", "7z", "bin", "apk", "deb", "rpm", "rar", "zip",
+    // binary
+    "pkg", "pyd", "pyz", "lib", "pack", "idx", "dylib", "so",
+    // executable
+    "com", "exe", "out", "coff", "obj", "dll", "app", "class",
+    // misc.
+    "log", "wad", "bsp", "bak", "sav", "dat", "lock",
+];
+
 pub trait FileSource {
     fn len(&self) -> usize;
     fn for_each(self, signal: &SyncPipes, iterator: impl Fn(RepoDirEntry) + Sync + Send);
@@ -28,30 +53,27 @@ pub trait FileSource {
 pub enum RepoDirEntry {
     Dir(RepoDir),
     File(RepoFile),
-    Other,
 }
 
 impl RepoDirEntry {
-    pub fn path(&self) -> Option<&str> {
+    pub fn path(&self) -> &str {
         match self {
-            Self::File(file) => Some(file.path.as_str()),
-            Self::Dir(dir) => Some(dir.path.as_str()),
-            Self::Other => None,
+            Self::File(file) => file.path.as_str(),
+            Self::Dir(dir) => dir.path.as_str(),
         }
     }
 
-    pub fn buffer(&self) -> Option<&str> {
+    pub fn buffer(&self) -> Option<String> {
         match self {
-            Self::File(file) => Some(file.buffer.as_str()),
+            Self::File(file) => (file.buffer)().ok(),
             _ => None,
         }
     }
 
-    pub fn branches(&self) -> Option<&[String]> {
+    pub fn branches(&self) -> &[String] {
         match self {
-            RepoDirEntry::Dir(d) => Some(&d.branches),
-            RepoDirEntry::File(f) => Some(&f.branches),
-            RepoDirEntry::Other => None,
+            RepoDirEntry::Dir(d) => &d.branches,
+            RepoDirEntry::File(f) => &f.branches,
         }
     }
 }
@@ -62,9 +84,24 @@ pub struct RepoDir {
 }
 
 pub struct RepoFile {
+    /// Path to file
     pub path: String,
-    pub buffer: String,
+    /// Branches which include the file
     pub branches: Vec<String>,
+    /// Length of the buffer
+    pub len: u64,
+    /// Lazily loaded buffer that contains the file contents
+    buffer: Box<dyn Fn() -> std::io::Result<String> + Send + Sync>,
+}
+
+impl RepoFile {
+    pub fn should_index(&self) -> bool {
+        should_index_path(&self.path) && self.len < MAX_FILE_LEN
+    }
+
+    pub fn buffer(&self) -> std::io::Result<String> {
+        (self.buffer)()
+    }
 }
 
 #[derive(Hash, Eq, PartialEq)]
@@ -74,38 +111,13 @@ pub enum FileType {
     Other,
 }
 
-fn should_index_entry(de: &ignore::DirEntry) -> bool {
-    should_index(&de.path())
-}
-
-fn should_index<P: AsRef<Path>>(p: &P) -> bool {
+fn should_index_path<P: AsRef<Path> + ?Sized>(p: &P) -> bool {
     let path = p.as_ref();
 
     // TODO: Make this more robust
     if path.components().any(|c| c.as_os_str() == ".git") {
         return false;
     }
-
-    #[rustfmt::skip]
-    const EXT_BLACKLIST: &[&str] = &[
-        // graphics
-        "png", "jpg", "jpeg", "ico", "bmp", "bpg", "eps", "pcx", "ppm", "tga", "tiff", "wmf", "xpm",
-        "svg",
-        // fonts
-        "ttf", "woff2", "fnt", "fon", "otf",
-        // documents
-        "pdf", "ps", "doc", "dot", "docx", "dotx", "xls", "xlsx", "xlt", "odt", "ott", "ods", "ots", "dvi", "pcl",
-        // media
-        "mp3", "ogg", "ac3", "aac", "mod", "mp4", "mkv", "avi", "m4v", "mov", "flv",
-        // compiled
-        "jar", "pyc", "war", "ear",
-        // compression
-        "tar", "gz", "bz2", "xz", "7z", "bin", "apk", "deb", "rpm",
-        // executable
-        "com", "exe", "out", "coff", "obj", "dll", "app", "class",
-        // misc.
-        "log", "wad", "bsp", "bak", "sav", "dat", "lock",
-    ];
 
     let Some(ext) = path.extension() else {
         return true;
@@ -193,7 +205,7 @@ mod test {
         ];
 
         for (path, index) in tests {
-            assert_eq!(should_index(&Path::new(path)), index);
+            assert_eq!(should_index_path(&Path::new(path)), index);
         }
     }
 }

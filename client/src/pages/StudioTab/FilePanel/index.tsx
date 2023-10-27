@@ -4,6 +4,7 @@ import React, {
   SetStateAction,
   useCallback,
   useEffect,
+  useMemo,
   useState,
 } from 'react';
 import { Trans, useTranslation } from 'react-i18next';
@@ -26,6 +27,7 @@ import BreadcrumbsPath from '../../../components/BreadcrumbsPath';
 import KeyboardChip from '../KeyboardChip';
 import useKeyboardNavigation from '../../../hooks/useKeyboardNavigation';
 import OverflowTracker from '../../../components/OverflowTracker';
+import BlueChip from '../BlueChip';
 
 type Props = {
   setLeftPanel: Dispatch<SetStateAction<StudioLeftPanelDataType>>;
@@ -41,6 +43,7 @@ type Props = {
     branch: string | null,
   ) => void;
   isActiveTab: boolean;
+  setIsChangeUnsaved: Dispatch<SetStateAction<boolean>>;
 };
 
 const HEADER_HEIGHT = 32;
@@ -59,6 +62,7 @@ const FilePanel = ({
   onFileRangesChanged,
   isActiveTab,
   isFileInContext,
+  setIsChangeUnsaved,
 }: Props) => {
   useTranslation();
   const [file, setFile] = useState<File | null>(null);
@@ -148,6 +152,17 @@ const FilePanel = ({
     [onSubmit],
   );
   useKeyboardNavigation(handleKeyEvent, !isActiveTab);
+
+  const hasChanges = useMemo(() => {
+    return (
+      !isFileInContext ||
+      JSON.stringify(initialRanges) !== JSON.stringify(selectedLines)
+    );
+  }, [isFileInContext, initialRanges, selectedLines]);
+
+  useEffect(() => {
+    setIsChangeUnsaved(hasChanges);
+  }, [hasChanges]);
 
   return (
     <div className="flex flex-col w-full flex-1 overflow-auto relative">
@@ -250,9 +265,19 @@ const FilePanel = ({
               Only the selected lines (# - #) will be used as context.
             </Trans>
           ) : (
-            <Trans>Only the selected ranges will be used as context.</Trans>
+            <>
+              <Trans>Only the selected ranges will be used as context.</Trans>
+            </>
           )}
         </p>
+        {selectedLines?.length > 1 && (
+          <div className="pointer-events-none select-none cursor-default flex gap-1 items-center">
+            <Trans>
+              <BlueChip text="↑" />
+              <BlueChip text="↓" /> to navigate.
+            </Trans>
+          </div>
+        )}
         {!!selectedLines.length && (
           <Button
             variant="tertiary"

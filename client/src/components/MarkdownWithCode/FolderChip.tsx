@@ -1,27 +1,22 @@
-import React, { useCallback } from 'react';
+import React, { useCallback, useContext } from 'react';
 import { ArrowOut, FolderClosed } from '../../icons';
 import DirEntry from '../IdeNavigation/DirEntry';
 import { search } from '../../services/api';
 import { buildRepoQuery } from '../../utils';
 import { Directory } from '../../types/api';
+import { SyncStatus } from '../../types/general';
+import { AppNavigationContext } from '../../context/appNavigationContext';
+import OverflowTracker from '../OverflowTracker';
 
 type Props = {
   onClick: () => void;
   path: string;
   selectedBranch: string | null;
   repoName?: string;
-  openFileModal?: (path: string) => void;
-  isSummary?: boolean;
 };
 
-const FolderChip = ({
-  onClick,
-  path,
-  repoName,
-  selectedBranch,
-  openFileModal,
-  isSummary,
-}: Props) => {
+const FolderChip = ({ onClick, path, repoName, selectedBranch }: Props) => {
+  const { navigateFullResult } = useContext(AppNavigationContext);
   const fetchFiles = useCallback(
     async (path?: string) => {
       const resp = await search(buildRepoQuery(repoName, path, selectedBranch));
@@ -41,12 +36,11 @@ const FolderChip = ({
 
   const navigateToPath = useCallback(
     (path: string) => {
-      if (openFileModal) {
-        openFileModal(path);
-      }
+      navigateFullResult(path);
     },
-    [openFileModal],
+    [navigateFullResult],
   );
+
   return (
     <>
       <button
@@ -63,10 +57,12 @@ const FolderChip = ({
           <ArrowOut sizeClassName="w-3.5 h-3.5" />
         </span>
       </button>
-      {!isSummary && (
-        <div
-          className={`w-full my-4 p-4 bg-bg-shade text-sm border border-bg-border rounded-md relative max-h-80 overflow-auto`}
-        >
+      <div
+        className={
+          'w-full flex flex-col my-1 folder-chip text-sm border border-bg-border rounded-md overflow-auto max-h-80 p-1'
+        }
+      >
+        <OverflowTracker className="auto-fade-vertical">
           <DirEntry
             name={path}
             isDirectory
@@ -76,9 +72,14 @@ const FolderChip = ({
             fullPath={path}
             navigateToPath={navigateToPath}
             defaultOpen
+            indexed
+            repoRef={''}
+            repoStatus={SyncStatus.Done}
+            refetchParentFolder={() => {}}
+            markRepoIndexing={() => {}}
           />
-        </div>
-      )}
+        </OverflowTracker>
+      </div>
     </>
   );
 };

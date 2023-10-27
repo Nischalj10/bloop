@@ -1,10 +1,13 @@
+import React, { Dispatch, SetStateAction, useContext } from 'react';
 import {
   ChatMessage,
   ChatMessageAuthor,
   ChatMessageServer,
-} from '../../types/general';
-import useScrollToBottom from '../../hooks/useScrollToBottom';
+} from '../../../types/general';
+import useScrollToBottom from '../../../hooks/useScrollToBottom';
+import { AppNavigationContext } from '../../../context/appNavigationContext';
 import Message from './ConversationMessage';
+import FirstMessage from './FirstMessage';
 
 type Props = {
   conversation: ChatMessage[];
@@ -14,6 +17,7 @@ type Props = {
   isLoading?: boolean;
   isHistory?: boolean;
   onMessageEdit: (queryId: string, i: number) => void;
+  setInputValue: Dispatch<SetStateAction<string>>;
 };
 
 const Conversation = ({
@@ -24,18 +28,26 @@ const Conversation = ({
   isHistory,
   repoName,
   onMessageEdit,
+  setInputValue,
 }: Props) => {
   const { messagesRef, handleScroll, scrollToBottom } =
     useScrollToBottom(conversation);
+  const { navigatedItem } = useContext(AppNavigationContext);
 
   return (
     <div
-      className={`w-full flex flex-col gap-3 pb-3 overflow-auto ${
-        !isHistory ? 'max-h-60' : ''
-      }`}
+      className={`w-full flex flex-col gap-3 overflow-auto pb-28`}
       ref={messagesRef}
       onScroll={handleScroll}
     >
+      {!isHistory && (
+        <FirstMessage
+          repoName={repoName}
+          setInputValue={setInputValue}
+          repoRef={repoRef}
+          isEmptyConversation={!conversation.length}
+        />
+      )}
       {conversation.map((m, i) => (
         <Message
           key={i}
@@ -43,9 +55,6 @@ const Conversation = ({
           isLoading={m.author === ChatMessageAuthor.Server && m.isLoading}
           loadingSteps={
             m.author === ChatMessageAuthor.Server ? m.loadingSteps : []
-          }
-          results={
-            m.author === ChatMessageAuthor.Server ? m.results : undefined
           }
           isHistory={isHistory}
           author={m.author}
@@ -72,8 +81,10 @@ const Conversation = ({
           responseTimestamp={
             m.author === ChatMessageAuthor.Server ? m.responseTimestamp : null
           }
-          explainedFile={
-            m.author === ChatMessageAuthor.Server ? m.explainedFile : undefined
+          singleFileExplanation={
+            m.author === ChatMessageAuthor.Server &&
+            !!m.explainedFile &&
+            m.explainedFile === navigatedItem?.path
           }
         />
       ))}

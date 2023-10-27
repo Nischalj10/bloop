@@ -1,4 +1,4 @@
-import React, { memo, useMemo } from 'react';
+import React, { memo, useCallback, useContext, useMemo } from 'react';
 import { Trans } from 'react-i18next';
 import { FileTreeFileType, RepositoryFile } from '../../types';
 import Accordion from '../Accordion';
@@ -9,6 +9,9 @@ import {
   isWindowsPath,
   splitPathForBreadcrumbs,
 } from '../../utils';
+import { UIContext } from '../../context/uiContext';
+import { SyncStatus } from '../../types/general';
+import { forceFileToBeIndexed } from '../../services/api';
 import FileRow from './FileRow';
 
 type Props = {
@@ -18,6 +21,8 @@ type Props = {
   onClick: (p: string, type: FileTreeFileType) => void;
   maxInitialFiles?: number;
   noRepoName?: boolean;
+  repoStatus: SyncStatus;
+  markRepoIndexing: () => void;
 };
 
 const RepositoryFiles = ({
@@ -27,7 +32,10 @@ const RepositoryFiles = ({
   repositoryName,
   maxInitialFiles,
   noRepoName,
+  repoStatus,
+  markRepoIndexing,
 }: Props) => {
+  const { tab } = useContext(UIContext.Tab);
   const pathParts = useMemo<PathParts[]>(() => {
     const parts = splitPathForBreadcrumbs(
       currentPath,
@@ -57,6 +65,14 @@ const RepositoryFiles = ({
     ];
   }, [currentPath, onClick, repositoryName]);
 
+  const onFileIndexRequested = useCallback(
+    (filePath: string) => {
+      forceFileToBeIndexed(tab.repoRef, filePath);
+      markRepoIndexing();
+    },
+    [tab.repoRef, markRepoIndexing],
+  );
+
   return (
     <Accordion
       title={
@@ -78,6 +94,9 @@ const RepositoryFiles = ({
                 path={file.path}
                 name={file.name}
                 type={file.type}
+                indexed={file.indexed}
+                onFileIndexRequested={onFileIndexRequested}
+                repoStatus={repoStatus}
                 onClick={onClick}
                 key={id}
               />
@@ -95,6 +114,9 @@ const RepositoryFiles = ({
             path={file.path}
             name={file.name}
             type={file.type}
+            indexed={file.indexed}
+            onFileIndexRequested={onFileIndexRequested}
+            repoStatus={repoStatus}
             onClick={onClick}
             key={id}
           />

@@ -6,7 +6,7 @@ use crate::{
     cache::FileCache,
     indexes,
     remotes::RemoteError,
-    repo::{Backend, RepoError, RepoMetadata, RepoRef, Repository, SyncStatus},
+    repo::{Backend, FilterUpdate, RepoError, RepoMetadata, RepoRef, Repository, SyncStatus},
     Application,
 };
 
@@ -14,10 +14,11 @@ use std::{path::PathBuf, sync::Arc};
 
 use super::control::SyncPipes;
 
-pub(crate) struct SyncHandle {
+pub struct SyncHandle {
     pub(crate) reporef: RepoRef,
-    pub(crate) new_branch_filters: Option<crate::repo::BranchFilter>,
-    pub(super) pipes: SyncPipes,
+    pub(crate) filter_updates: FilterUpdate,
+    pub(crate) pipes: SyncPipes,
+    pub(crate) file_cache: FileCache,
     app: Application,
     exited: flume::Sender<SyncStatus>,
     exit_signal: flume::Receiver<SyncStatus>,
@@ -94,10 +95,16 @@ impl SyncHandle {
         app: Application,
         reporef: RepoRef,
         status: super::ProgressStream,
-        new_branch_filters: Option<crate::repo::BranchFilter>,
+        filter_updates: Option<FilterUpdate>,
     ) -> Arc<Self> {
+        // Going through an extra hoop here to ensure the outward
+        // facing interface communicates intent.
+        //
+        // How filter updates work specifically should not have to
+        // trickle down to all callers.
+        let filter_updates = filter_updates.unwrap_or_default();
         let (exited, exit_signal) = flume::bounded(1);
-        let pipes = SyncPipes::new(reporef.clone(), new_branch_filters.clone(), status);
+        let pipes = SyncPipes::new(reporef.clone(), filter_updates.clone(), status);
         let current = app
             .repo_pool
             .entry_async(reporef.clone())
@@ -121,6 +128,7 @@ impl SyncHandle {
                         last_commit_unix_secs: 0,
                         most_common_lang: None,
                         branch_filter: None,
+                        file_filter: Default::default(),
                     }
                 }
             });
@@ -128,8 +136,9 @@ impl SyncHandle {
         let sh = Self {
             app: app.clone(),
             reporef: reporef.clone(),
+            file_cache: FileCache::new(app.sql.clone(), app.semantic.clone()),
             pipes,
-            new_branch_filters,
+            filter_updates,
             exited,
             exit_signal,
         };
@@ -162,7 +171,6 @@ impl SyncHandle {
                     }
                 }
                 Err(err) => {
-                    error!(?err, ?self.reporef, "failed to sync repository");
                     self.set_status(|_| SyncStatus::Error {
                         message: err.to_string(),
                     })
@@ -178,25 +186,47 @@ impl SyncHandle {
             return Err(SyncError::Cancelled);
         }
 
+        // Can we unwrap here?
+        let repository = repo_pool
+            .read_async(&self.reporef, |_k, v| v.clone())
+            .await
+            .unwrap();
+
+        let tutorial_questions = if repository.last_index_unix_secs == 0 {
+            let db = self.app.sql.clone();
+            let llm_gateway = self.app.user().await.llm_gateway(&self.app).await;
+            let repo_pool = self.app.repo_pool.clone();
+            let reporef = self.reporef.clone();
+
+            Some(tokio::task::spawn(
+                crate::commits::generate_tutorial_questions(db, llm_gateway, repo_pool, reporef),
+            ))
+        } else {
+            None
+        };
+
         let indexed = self.index().await;
         let status = match indexed {
             Ok(Either::Left(status)) => Some(status),
             Ok(Either::Right(state)) => {
                 info!("commit complete; indexing done");
                 self.app.repo_pool.update(&self.reporef, |_k, repo| {
-                    repo.sync_done_with(self.new_branch_filters.as_ref(), state)
+                    repo.sync_done_with(&self.filter_updates, state)
                 });
+
+                if let Some(tutorial_questions) = tutorial_questions {
+                    if let Err(err) = tutorial_questions.await {
+                        error!(?err, "failed to generate tutorial questions");
+                    }
+                }
 
                 // technically `sync_done_with` does this, but we want to send notifications
                 self.set_status(|_| SyncStatus::Done)
             }
             Err(SyncError::Cancelled) => self.set_status(|_| SyncStatus::Cancelled),
-            Err(err) => {
-                error!(?err, ?self.reporef, "failed to index repository");
-                self.set_status(|_| SyncStatus::Error {
-                    message: err.to_string(),
-                })
-            }
+            Err(err) => self.set_status(|_| SyncStatus::Error {
+                message: err.to_string(),
+            }),
         };
 
         Ok(status.expect("failed to update repo status"))
@@ -217,8 +247,12 @@ impl SyncHandle {
                 .await
                 .unwrap();
 
-            if let Some(ref bf) = self.new_branch_filters {
-                orig.branch_filter = bf.patch(orig.branch_filter.as_ref());
+            if let Some(ref bf) = self.filter_updates.branch_filter {
+                orig.branch_filter = bf.patch_into(orig.branch_filter.as_ref());
+            }
+
+            if let Some(ref ff) = self.filter_updates.file_filter {
+                orig.file_filter = ff.patch_into(&orig.file_filter);
             }
             orig
         };
@@ -243,7 +277,7 @@ impl SyncHandle {
 
         match indexed {
             Ok(_) => {
-                writers.commit().await.map_err(SyncError::Tantivy)?;
+                writers.commit().map_err(SyncError::Tantivy)?;
                 indexed.map_err(SyncError::Indexing)
             }
             Err(_) if self.pipes.is_removed() => self.delete_repo(&repo, writers).await,
@@ -268,7 +302,7 @@ impl SyncHandle {
 
         let deleted = self.delete_repo_indexes(repo, &writers).await;
         if deleted.is_ok() {
-            writers.commit().await.map_err(SyncError::Tantivy)?;
+            writers.commit().map_err(SyncError::Tantivy)?;
             self.app
                 .config
                 .source
@@ -286,8 +320,8 @@ impl SyncHandle {
             Some(creds) => creds,
             None => {
                 let Some(path) = repo.local_path() else {
-		    return Err(SyncError::NoKeysForBackend(backend));
-		};
+                    return Err(SyncError::NoKeysForBackend(backend));
+                };
 
                 if !self.app.allow_path(&path) {
                     return Err(SyncError::PathNotAllowed(path));
@@ -375,20 +409,14 @@ impl SyncHandle {
         repo: &Repository,
         writers: &indexes::GlobalWriteHandleRef<'_>,
     ) -> Result<()> {
-        let Application {
-            ref semantic,
-            ref sql,
-            ..
-        } = self.app;
+        let Application { ref semantic, .. } = self.app;
 
-        if let Some(semantic) = semantic {
-            semantic
-                .delete_points_for_hash(&self.reporef.to_string(), std::iter::empty())
-                .await;
-        }
+        semantic
+            .delete_points_for_hash(&self.reporef.to_string(), std::iter::empty())
+            .await;
 
-        FileCache::for_repo(sql, semantic.as_ref(), &self.reporef)
-            .delete()
+        self.file_cache
+            .delete(&self.reporef)
             .await
             .map_err(SyncError::Sql)?;
 
@@ -405,10 +433,6 @@ impl SyncHandle {
         Ok(())
     }
 
-    pub(crate) fn pipes(&self) -> &SyncPipes {
-        &self.pipes
-    }
-
     pub(crate) fn set_status(
         &self,
         updater: impl FnOnce(&Repository) -> SyncStatus,
@@ -418,7 +442,11 @@ impl SyncHandle {
             repo.sync_status.clone()
         })?;
 
-        debug!(?self.reporef, ?new_status, "new status");
+        if let SyncStatus::Error { ref message } = new_status {
+            error!(?self.reporef, err=?message, "indexing failed");
+        } else {
+            debug!(?self.reporef, ?new_status, "new status");
+        }
         self.pipes.status(new_status.clone());
         Some(new_status)
     }

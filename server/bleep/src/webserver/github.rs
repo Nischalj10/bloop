@@ -1,6 +1,10 @@
-use super::{middleware::User, prelude::*};
+use super::{
+    aaa::{AuthResponse, CredentialStatus},
+    middleware::User,
+    prelude::*,
+};
 use crate::{
-    remotes::{github, AuthResponse, BackendCredential},
+    remotes::{self, github, BackendCredential},
     repo::Backend,
     Application,
 };
@@ -10,22 +14,6 @@ use tracing::{debug, error, warn};
 
 use std::time::{Duration, Instant};
 
-#[derive(Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(super) enum GithubResponse {
-    AuthenticationNeeded { url: String },
-    Status(GithubCredentialStatus),
-}
-
-impl super::ApiResponse for GithubResponse {}
-
-#[derive(Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(super) enum GithubCredentialStatus {
-    Ok,
-    Missing,
-}
-
 /// Connect to Github through Cognito & OAuth
 //
 pub(super) async fn login(Extension(app): Extension<Application>) -> impl IntoResponse {
@@ -33,41 +21,35 @@ pub(super) async fn login(Extension(app): Extension<Application>) -> impl IntoRe
 
     tokio::spawn(poll_for_oauth_token(state.clone(), app.clone()));
 
-    let url_base = app
+    let mut url_base = app
         .config
         .cognito_auth_url
-        .as_ref()
+        .clone()
         .expect("auth not configured");
     let client_id = app
         .config
         .cognito_client_id
         .as_ref()
         .expect("auth not configured");
-    let redirect_url = reqwest::Url::parse(
-        app.config
-            .cognito_mgmt_url
-            .as_ref()
-            .expect("auth not configured"),
-    )
-    .unwrap()
-    .join("complete")
-    .unwrap()
-    .to_string();
+    let redirect_url = app
+        .config
+        .cognito_mgmt_url
+        .as_ref()
+        .expect("auth not configured")
+        .join("complete")
+        .unwrap()
+        .to_string();
 
-    let url = reqwest::Url::parse_with_params(
-        url_base,
-        &[
-            ("response_type", "code"),
-            ("scope", "email openid profile"),
-            ("redirect_url", &redirect_url),
-            ("client_id", client_id),
-            ("state", &state),
-        ],
-    )
-    .unwrap()
-    .to_string();
+    url_base.query_pairs_mut().extend_pairs(&[
+        ("response_type", "code"),
+        ("scope", "email openid profile"),
+        ("redirect_url", &redirect_url),
+        ("client_id", client_id),
+        ("state", &state),
+    ]);
 
-    json(GithubResponse::AuthenticationNeeded { url })
+    let url = url_base.to_string();
+    json(AuthResponse::AuthenticationNeeded { url })
 }
 
 /// Remove Github OAuth credentials
@@ -76,7 +58,7 @@ pub(super) async fn logout(
     Extension(user): Extension<User>,
     State(app): State<Application>,
 ) -> impl IntoResponse {
-    if let Some(login) = user.login() {
+    if let Some(login) = user.username() {
         app.user_profiles.remove(login);
         app.user_profiles.store().unwrap();
         app.credentials.remove_user().await;
@@ -99,10 +81,7 @@ pub(super) async fn logout(
             .as_ref()
             .expect("auth not configured");
 
-        let url = reqwest::Url::parse(url_base)
-            .unwrap()
-            .join("revoke")
-            .unwrap();
+        let url = url_base.join("revoke").unwrap();
 
         reqwest::Client::new()
             .post(url)
@@ -112,7 +91,7 @@ pub(super) async fn logout(
             .unwrap();
 
         match app.credentials.store() {
-            Ok(_) => return Ok(json(GithubResponse::Status(GithubCredentialStatus::Ok))),
+            Ok(_) => return Ok(json(AuthResponse::Status(CredentialStatus::Ok))),
             Err(err) => {
                 error!(?err, "Failed to delete credentials from disk");
                 return Err(Error::internal("failed to save changes"));
@@ -120,24 +99,20 @@ pub(super) async fn logout(
         }
     }
 
-    Ok(json(GithubResponse::Status(
-        GithubCredentialStatus::Missing,
-    )))
+    Ok(json(AuthResponse::Status(CredentialStatus::Missing)))
 }
 
 async fn poll_for_oauth_token(code: String, app: Application) {
     let start = Instant::now();
 
     let query_url = {
-        let mut url = reqwest::Url::parse(
-            app.config
-                .cognito_mgmt_url
-                .as_ref()
-                .expect("auth not configured"),
-        )
-        .unwrap()
-        .join("access_token")
-        .unwrap();
+        let mut url = app
+            .config
+            .cognito_mgmt_url
+            .as_ref()
+            .expect("auth not configured")
+            .join("access_token")
+            .unwrap();
 
         url.set_query(Some(&format!("state={code}")));
         url.to_string()
@@ -158,20 +133,21 @@ async fn poll_for_oauth_token(code: String, app: Application) {
         let response = match reqwest::get(&query_url).await {
             Ok(res) => res.json().await,
             Err(err) => {
-                warn!(?err, "github authorization failed");
-                return;
+                warn!(?err, "github authorization query failed");
+                clock.tick().await;
+                continue;
             }
         };
 
         match response {
-            Ok(AuthResponse::Backoff { backoff_secs }) => {
+            Ok(remotes::AuthResponse::Backoff { backoff_secs }) => {
                 clock = tokio::time::interval(Duration::from_secs(backoff_secs));
                 clock.tick().await;
             }
-            Ok(AuthResponse::Success(success)) => {
+            Ok(remotes::AuthResponse::Success(success)) => {
                 break success;
             }
-            Ok(AuthResponse::Error { error }) => {
+            Ok(remotes::AuthResponse::Error { error }) => {
                 warn!(?error, "bloop authentication failed");
                 return;
             }
@@ -184,6 +160,9 @@ async fn poll_for_oauth_token(code: String, app: Application) {
 
     debug!("acquired credentials");
     app.credentials.set_github(github::Auth::OAuth(auth));
+    crate::periodic::validate_github_credentials(&app).await;
+    crate::periodic::update_repo_list(&app).await;
+
     let username = app
         .credentials
         .github()
@@ -202,12 +181,14 @@ async fn poll_for_oauth_token(code: String, app: Application) {
         .map(|a| a.tracking_id(Some(&username)))
         .unwrap_or_default();
 
+    let user = app.user().await;
+
     app.with_analytics(|analytics| {
         use rudderanalytics::message::{Identify, Message};
         analytics.send(Message::Identify(Identify {
             user_id: Some(tracking_id.clone()),
             traits: Some(serde_json::json!({
-                "org_name": app.org_name(),
+                "org_name": user.org_name(),
                 "device_id": analytics.device_id(),
                 "is_self_serve": app.env.is_cloud_instance(),
                 "github_username": username,

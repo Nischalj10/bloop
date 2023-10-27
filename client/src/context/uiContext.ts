@@ -6,8 +6,6 @@ export const UIContext = {
   Settings: createContext({
     isSettingsOpen: false,
     setSettingsOpen: (b: boolean) => {},
-    settingsSection: 0,
-    setSettingsSection: (n: number) => {},
   }),
   Symbols: createContext({
     symbolsCollapsed: true,
@@ -28,10 +26,7 @@ export const UIContext = {
     isGithubConnected: false,
     setGithubConnected: (b: boolean) => {},
     isGithubChecked: false,
-  }),
-  RightPanel: createContext({
-    isRightPanelOpen: false,
-    setRightPanelOpen: (b: boolean) => {},
+    refreshToken: (refreshT: string) => Promise.resolve(),
   }),
   Filters: createContext<{
     isFiltersOpen: boolean;
@@ -55,6 +50,8 @@ export const UIContext = {
   UpgradePopup: createContext({
     isUpgradePopupOpen: false,
     setUpgradePopupOpen: (b: boolean) => {},
+    isWaitingUpgradePopupOpen: false,
+    setWaitingUpgradePopupOpen: (b: boolean) => {},
   }),
   Tab: createContext<{ tab: RepoTabType }>({
     tab: {

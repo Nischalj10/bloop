@@ -18,12 +18,11 @@ import {
   StudioRightPanelType,
   StudioTabType,
 } from '../../types/general';
-import { getCodeStudio, patchCodeStudio } from '../../services/api';
+import { patchCodeStudio } from '../../services/api';
 import { CodeStudioType, HistoryConversationTurn } from '../../types/api';
 import useResizeableSplitPanel from '../../hooks/useResizeableSplitPanel';
 import { TOKEN_LIMIT } from '../../consts/codeStudio';
 import { Info } from '../../icons';
-import { TabsContext } from '../../context/tabsContext';
 import { getPlainFromStorage, STUDIO_GUIDE_DONE } from '../../services/storage';
 import { UIContext } from '../../context/uiContext';
 import ContextPanel from './ContextPanel';
@@ -33,22 +32,23 @@ import AddContextModal from './AddContextModal';
 import RightPanel from './RightPanel';
 import FilePanel from './FilePanel';
 
-const emptyCodeStudio: CodeStudioType = {
-  messages: [],
-  context: [],
-  token_counts: { total: 0, per_file: [], messages: 0 },
-  name: '',
-  id: '',
-  modified_at: '',
+type Props = {
+  tab: StudioTabType;
+  isActive: boolean;
+  currentContext: CodeStudioType['context'];
+  currentMessages: CodeStudioType['messages'];
+  currentTokenCounts: CodeStudioType['token_counts'];
+  refetchCodeStudio: (keyToUpdate?: keyof CodeStudioType) => Promise<void>;
 };
 
 const ContentContainer = ({
   tab,
   isActive,
-}: {
-  tab: StudioTabType;
-  isActive: boolean;
-}) => {
+  currentContext,
+  currentMessages,
+  currentTokenCounts,
+  refetchCodeStudio,
+}: Props) => {
   const [leftPanel, setLeftPanel] = useState<StudioLeftPanelDataType>({
     type: StudioLeftPanelType.CONTEXT,
     data: null,
@@ -59,46 +59,19 @@ const ContentContainer = ({
   // });
   const { setStudioGuideOpen } = useContext(UIContext.StudioGuide);
   const [isAddContextOpen, setAddContextOpen] = useState(false);
-  const [currentState, setCurrentState] =
-    useState<CodeStudioType>(emptyCodeStudio);
   const [previewingState, setPreviewingState] = useState<null | CodeStudioType>(
     null,
   );
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
+  const [isChangeUnsaved, setIsChangeUnsaved] = useState(false);
   const { leftPanelRef, rightPanelRef, dividerRef, containerRef } =
     useResizeableSplitPanel();
-  const { updateTabName } = useContext(TabsContext);
-
-  const refetchCodeStudio = useCallback(
-    async (keyToUpdate?: keyof CodeStudioType) => {
-      if (tab.key) {
-        const resp = await getCodeStudio(tab.key);
-        updateTabName(tab.key, resp.name);
-        setCurrentState((prev) => {
-          if (JSON.stringify(resp) === JSON.stringify(prev)) {
-            return prev;
-          }
-          if (keyToUpdate) {
-            return { ...prev, [keyToUpdate]: resp[keyToUpdate] };
-          }
-          return resp;
-        });
-      }
-    },
-    [tab.key],
-  );
 
   useEffect(() => {
     if (!getPlainFromStorage(STUDIO_GUIDE_DONE)) {
       setStudioGuideOpen(true);
     }
   }, []);
-
-  useEffect(() => {
-    if (isActive) {
-      refetchCodeStudio();
-    }
-  }, [refetchCodeStudio, isActive]);
 
   const handleAddContextClose = useCallback(() => setAddContextOpen(false), []);
   const onFileAdded = useCallback(
@@ -111,7 +84,7 @@ const ContentContainer = ({
       if (tab.key) {
         patchCodeStudio(tab.key, {
           context: [
-            ...currentState.context,
+            ...currentContext,
             {
               path: filePath,
               branch,
@@ -123,7 +96,7 @@ const ContentContainer = ({
         }).then(() => refetchCodeStudio());
       }
     },
-    [tab.key, currentState.context],
+    [tab.key, currentContext],
   );
 
   const onFileSelected = useCallback(
@@ -143,7 +116,7 @@ const ContentContainer = ({
       repo_ref: string,
       branch: string | null,
     ) => {
-      const patchedFile = currentState.context.find(
+      const patchedFile = currentContext.find(
         (f) =>
           f.path === filePath && f.repo === repo_ref && f.branch === branch,
       );
@@ -157,7 +130,7 @@ const ContentContainer = ({
       }
       if (tab.key && patchedFile) {
         patchedFile.ranges = mappedRanges;
-        const newContext = currentState.context
+        const newContext = currentContext
           .filter(
             (f) =>
               f.path !== filePath || f.repo !== repo_ref || f.branch !== branch,
@@ -168,7 +141,7 @@ const ContentContainer = ({
         }).then(() => refetchCodeStudio());
       }
     },
-    [tab.key, currentState.context],
+    [tab.key, currentContext],
   );
 
   const onFileHide = useCallback(
@@ -178,13 +151,13 @@ const ContentContainer = ({
       branch: string | null,
       hide: boolean,
     ) => {
-      const patchedFile = currentState.context.find(
+      const patchedFile = currentContext.find(
         (f) =>
           f.path === filePath && f.repo === repo_ref && f.branch === branch,
       );
       if (tab.key && patchedFile) {
         patchedFile.hidden = hide;
-        const newContext = currentState.context
+        const newContext = currentContext
           .filter(
             (f) =>
               f.path !== filePath || f.repo !== repo_ref || f.branch !== branch,
@@ -195,7 +168,7 @@ const ContentContainer = ({
         }).then(() => refetchCodeStudio());
       }
     },
-    [tab.key, currentState.context],
+    [tab.key, currentContext],
   );
 
   const onFileRemove = useCallback(
@@ -206,7 +179,7 @@ const ContentContainer = ({
     ) => {
       const files = Array.isArray(f) ? f : [f];
       let newContext: StudioContextFile[] = JSON.parse(
-        JSON.stringify(currentState.context),
+        JSON.stringify(currentContext),
       );
       files.forEach(({ path, repo, branch }) => {
         const patchedFile = newContext.findIndex(
@@ -220,7 +193,7 @@ const ContentContainer = ({
         context: newContext,
       }).then(() => refetchCodeStudio());
     },
-    [tab.key, currentState.context],
+    [tab.key, currentContext],
   );
 
   const handlePreview = useCallback(
@@ -256,8 +229,26 @@ const ContentContainer = ({
   }, [isHistoryOpen]);
 
   const stateToShow = useMemo(() => {
-    return isHistoryOpen && previewingState ? previewingState : currentState;
-  }, [isHistoryOpen, previewingState, currentState]);
+    return isHistoryOpen && previewingState
+      ? previewingState
+      : {
+          context: currentContext,
+          messages: currentMessages,
+          token_counts: currentTokenCounts,
+        };
+  }, [
+    isHistoryOpen,
+    previewingState,
+    currentContext,
+    currentMessages,
+    currentTokenCounts,
+  ]);
+
+  useEffect(() => {
+    if (leftPanel.type !== StudioRightPanelType.FILE) {
+      setIsChangeUnsaved(false);
+    }
+  }, [leftPanel.type]);
 
   return (
     <PageTemplate renderPage="studio">
@@ -312,6 +303,7 @@ const ContentContainer = ({
                   setLeftPanel={setLeftPanel}
                   onFileRangesChanged={onFileRangesChanged}
                   isActiveTab={isActive}
+                  setIsChangeUnsaved={setIsChangeUnsaved}
                 />
               ) : null}
               <AddContextModal
@@ -344,6 +336,7 @@ const ContentContainer = ({
                   null,
                 )}
                 isActiveTab={isActive}
+                isChangeUnsaved={isChangeUnsaved}
               />
             </div>
           </div>

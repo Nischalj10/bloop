@@ -13,8 +13,8 @@ import throttle from 'lodash.throttle';
 import {
   StudioConversationMessage,
   StudioConversationMessageAuthor,
-  StudioLeftPanelType,
   StudioLeftPanelDataType,
+  StudioLeftPanelType,
 } from '../../../../types/general';
 import Button from '../../../../components/Button';
 import { ArrowRefresh, TrashCanFilled } from '../../../../icons';
@@ -38,6 +38,8 @@ type Props = {
   isTokenLimitExceeded: boolean;
   isPreviewing: boolean;
   isActiveTab: boolean;
+  isChangeUnsaved: boolean;
+  hasContextError: boolean;
   handleRestore: () => void;
 };
 
@@ -70,6 +72,8 @@ const Conversation = ({
   handleRestore,
   isActiveTab,
   refetchCodeStudio,
+  isChangeUnsaved,
+  hasContextError,
 }: Props) => {
   const { t } = useTranslation();
   const { inputValue } = useContext(StudioContext.Input);
@@ -294,6 +298,13 @@ const Conversation = ({
         // Set input to the message being removed
         setInput(conversation[i]);
       }
+      if (
+        i === conversation.length - 1 &&
+        conversation[i].author === StudioConversationMessageAuthor.ASSISTANT &&
+        isLoading
+      ) {
+        handleCancel();
+      }
       setConversation((prev) => {
         const newConv = prev.filter((_, j) =>
           andSubsequent ? i > j : i !== j,
@@ -309,17 +320,13 @@ const Conversation = ({
         return newConv;
       });
 
-      const messages: ({ User: string } | { Assistant: string })[] =
-        conversation
-          .map((c) => ({ [c.author as 'User']: c.message }))
-          .filter((m, j) => (andSubsequent ? i > j : i !== j));
-      await patchCodeStudio(studioId, {
-        messages,
-      }).then(() => {
-        refetchCodeStudio('token_counts');
-      });
+      const messages = conversation.filter((m, j) =>
+        andSubsequent ? i > j : i !== j,
+      );
+      await saveConversation(true, messages);
+      refetchCodeStudio('token_counts');
     },
-    [conversation],
+    [conversation, isLoading],
   );
 
   const handleClearConversation = useCallback(async () => {
@@ -339,7 +346,13 @@ const Conversation = ({
         if (isPreviewing) {
           handleRestore();
         } else {
-          if (inputValue && !isTokenLimitExceeded && requestsLeft) {
+          if (
+            inputValue &&
+            !isTokenLimitExceeded &&
+            !hasContextError &&
+            requestsLeft &&
+            !isChangeUnsaved
+          ) {
             onSubmit();
           } else if (!requestsLeft) {
             setUpgradePopupOpen(true);
@@ -352,7 +365,7 @@ const Conversation = ({
         handleCancel();
       }
     },
-    [onSubmit, isLoading, setLeftPanel, isPreviewing],
+    [onSubmit, isLoading, setLeftPanel, isPreviewing, isChangeUnsaved],
   );
   useKeyboardNavigation(handleKeyEvent, !isActiveTab);
 
@@ -373,6 +386,8 @@ const Conversation = ({
               onMessageRemoved={onMessageRemoved}
               i={i}
               setLeftPanel={setLeftPanel}
+              isTokenLimitExceeded={isTokenLimitExceeded}
+              isLast={i === conversation.length - 1}
             />
           ))}
           {!isLoading &&
@@ -389,6 +404,8 @@ const Conversation = ({
                 scrollToBottom={scrollToBottom}
                 inputRef={inputRef}
                 setLeftPanel={setLeftPanel}
+                isTokenLimitExceeded={isTokenLimitExceeded}
+                isLast
               />
             )}
         </div>
@@ -434,7 +451,21 @@ const Conversation = ({
               ) : (
                 <Button
                   size="small"
-                  disabled={!inputValue || isTokenLimitExceeded}
+                  disabled={
+                    !inputValue ||
+                    isTokenLimitExceeded ||
+                    isChangeUnsaved ||
+                    hasContextError
+                  }
+                  title={
+                    isChangeUnsaved
+                      ? t('Save context changes before answer generation')
+                      : isTokenLimitExceeded
+                      ? t('Token limit exceeded')
+                      : hasContextError
+                      ? t('Check context files for any errors')
+                      : undefined
+                  }
                   onClick={onSubmit}
                 >
                   <Trans>Generate</Trans>
@@ -442,7 +473,10 @@ const Conversation = ({
                     <KeyboardChip
                       type="cmd"
                       variant={
-                        !inputValue || isTokenLimitExceeded
+                        !inputValue ||
+                        isTokenLimitExceeded ||
+                        isChangeUnsaved ||
+                        hasContextError
                           ? 'secondary'
                           : 'primary'
                       }
@@ -450,7 +484,10 @@ const Conversation = ({
                     <KeyboardChip
                       type="entr"
                       variant={
-                        !inputValue || isTokenLimitExceeded
+                        !inputValue ||
+                        isTokenLimitExceeded ||
+                        isChangeUnsaved ||
+                        hasContextError
                           ? 'secondary'
                           : 'primary'
                       }

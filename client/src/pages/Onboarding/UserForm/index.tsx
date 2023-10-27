@@ -13,11 +13,7 @@ import { EMAIL_REGEX } from '../../../consts/validations';
 import Button from '../../../components/Button';
 import { UIContext } from '../../../context/uiContext';
 import { DeviceContext } from '../../../context/deviceContext';
-import {
-  getConfig,
-  gitHubDeviceLogin,
-  gitHubLogout,
-} from '../../../services/api';
+import { getConfig, githubLogout, githubLogin } from '../../../services/api';
 import { Form } from '../index';
 import Dropdown from '../../../components/Dropdown/Normal';
 import { MenuItemType } from '../../../types/general';
@@ -26,6 +22,7 @@ import { themesMap } from '../../../components/Settings/Preferences';
 import { copyToClipboard, previewTheme } from '../../../utils';
 import LanguageSelector from '../../../components/LanguageSelector';
 import Tooltip from '../../../components/Tooltip';
+import { polling } from '../../../utils/requestUtils';
 
 type Props = {
   form: Form;
@@ -45,14 +42,15 @@ const UserForm = ({ form, setForm, onContinue }: Props) => {
   const [isBtnClicked, setBtnClicked] = useState(false);
   const [isLinkCopied, setLinkCopied] = useState(false);
   const [isTimedOut, setIsTimedOut] = useState(false);
+  const [showErrors, setShowErrors] = useState(false);
 
   const handleLogout = useCallback(() => {
-    gitHubLogout();
+    githubLogout();
     setGithubConnected(false);
   }, []);
 
   useEffect(() => {
-    gitHubDeviceLogin().then((data) => {
+    githubLogin().then((data) => {
       setLoginUrl(data.authentication_needed.url);
     });
   }, []);
@@ -64,7 +62,7 @@ const UserForm = ({ form, setForm, onContinue }: Props) => {
     } else {
       if (isTimedOut) {
         setIsTimedOut(false);
-        gitHubDeviceLogin().then((data) => {
+        githubLogin().then((data) => {
           setLoginUrl(data.authentication_needed.url);
           openLink(data.authentication_needed.url);
         });
@@ -88,21 +86,22 @@ const UserForm = ({ form, setForm, onContinue }: Props) => {
     let intervalId: number;
     let timerId: number;
     if (loginUrl && !isGithubConnected) {
-      checkGHAuth();
-      intervalId = window.setInterval(() => {
-        checkGHAuth().then((d) => {
-          if (
-            !!d.user_login &&
-            form.firstName &&
-            form.lastName &&
-            form.email &&
-            !form.emailError &&
-            document.activeElement?.tagName !== 'INPUT'
-          ) {
-            onContinue();
-          }
-        });
-      }, 500);
+      intervalId = polling(
+        () =>
+          checkGHAuth().then((d) => {
+            if (
+              !!d.user_login &&
+              form.firstName &&
+              form.lastName &&
+              form.email &&
+              !form.emailError &&
+              document.activeElement?.tagName !== 'INPUT'
+            ) {
+              onContinue();
+            }
+          }),
+        500,
+      );
       timerId = window.setTimeout(
         () => {
           clearInterval(intervalId);
@@ -130,6 +129,32 @@ const UserForm = ({ form, setForm, onContinue }: Props) => {
     setLinkCopied(true);
     setTimeout(() => setLinkCopied(false), 2000);
   }, [loginUrl]);
+
+  const handleSubmit = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (
+        !isGithubConnected ||
+        !form.firstName ||
+        !form.lastName ||
+        !form.email ||
+        !!form.emailError ||
+        !EMAIL_REGEX.test(form.email)
+      ) {
+        if (!EMAIL_REGEX.test(form.email)) {
+          setForm((prev) => ({
+            ...prev,
+            emailError: t('Email is not valid'),
+          }));
+        }
+        setShowErrors(true);
+        return;
+      }
+      onContinue();
+    },
+    [form, isGithubConnected, onContinue],
+  );
 
   return (
     <>
@@ -170,6 +195,11 @@ const UserForm = ({ form, setForm, onContinue }: Props) => {
             setForm((prev) => ({ ...prev, firstName: e.target.value }))
           }
           autoFocus
+          error={
+            showErrors && !form.firstName
+              ? t('First name is required')
+              : undefined
+          }
         />
         <TextInput
           value={form.lastName}
@@ -178,6 +208,11 @@ const UserForm = ({ form, setForm, onContinue }: Props) => {
           variant="filled"
           onChange={(e) =>
             setForm((prev) => ({ ...prev, lastName: e.target.value }))
+          }
+          error={
+            showErrors && !form.lastName
+              ? t('Last name is required')
+              : undefined
           }
         />
         <TextInput
@@ -198,7 +233,10 @@ const UserForm = ({ form, setForm, onContinue }: Props) => {
               }));
             }
           }}
-          error={form.emailError}
+          error={
+            form.emailError ||
+            (showErrors && !form.email ? t('Email is required') : undefined)
+          }
           name="email"
           placeholder={t('Email address')}
         />
@@ -223,7 +261,13 @@ const UserForm = ({ form, setForm, onContinue }: Props) => {
             }}
           />
         </div>
-        <div className="flex items-center pl-2.5 gap-2.5 border border-bg-border rounded-4">
+        <div
+          className={`flex items-center pl-2.5 gap-2.5 border ${
+            showErrors && !isGithubConnected
+              ? 'border-bg-danger'
+              : 'border-bg-border'
+          } rounded-4`}
+        >
           <GitHubLogo />
           <p className="callout text-label-title flex-1">
             {isGithubConnected ? envConfig.user_login : 'GitHub'}
@@ -244,6 +288,11 @@ const UserForm = ({ form, setForm, onContinue }: Props) => {
             {!isGithubConnected && <ChevronRight />}
           </button>
         </div>
+        {showErrors && !isGithubConnected && (
+          <p className="text-bg-danger caption -mt-3">
+            <Trans>Connect GitHub account to continue</Trans>
+          </p>
+        )}
         {!isGithubConnected && (
           <div className="text-center caption text-label-base">
             {isLinkShown ? (
@@ -275,20 +324,7 @@ const UserForm = ({ form, setForm, onContinue }: Props) => {
             )}
           </div>
         )}
-        <Button
-          disabled={
-            !isGithubConnected ||
-            !form.firstName ||
-            !form.lastName ||
-            !form.email ||
-            !!form.emailError
-          }
-          onClick={(e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            onContinue();
-          }}
-        >
+        <Button onClick={handleSubmit}>
           <Trans>Continue</Trans>
         </Button>
       </form>

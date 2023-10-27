@@ -2,6 +2,8 @@ use std::{sync::Arc, time::Duration};
 
 use anyhow::{anyhow, Context, Result};
 use futures::{Future, TryStreamExt};
+use once_cell::sync::OnceCell;
+use rake::*;
 use tokio::sync::mpsc::Sender;
 use tracing::{debug, error, info, instrument};
 
@@ -21,6 +23,9 @@ use crate::{
 
 use self::exchange::{Exchange, SearchStep, Update};
 
+/// The maximum number of steps the agent will take before forcing an answer.
+const MAX_STEPS: usize = 10;
+
 pub mod exchange;
 pub mod model;
 pub mod prompts;
@@ -36,6 +41,19 @@ mod tools {
     pub mod code;
     pub mod path;
     pub mod proc;
+}
+
+static STOPWORDS: OnceCell<StopWords> = OnceCell::new();
+static STOP_WORDS_LIST: &str = include_str!("stopwords.txt");
+
+fn stop_words() -> &'static StopWords {
+    STOPWORDS.get_or_init(|| {
+        let mut sw = StopWords::new();
+        for w in STOP_WORDS_LIST.lines() {
+            sw.insert(w.to_string());
+        }
+        sw
+    })
 }
 
 pub enum Error {
@@ -81,14 +99,21 @@ impl Drop for Agent {
         match self.exchange_state {
             ExchangeState::Failed => {}
             ExchangeState::Pending => {
-                self.last_exchange_mut().apply_update(Update::Cancel);
+                if std::thread::panicking() {
+                    self.track_query(
+                        EventData::output_stage("cancelled")
+                            .with_payload("message", "request panicked"),
+                    );
+                } else {
+                    self.last_exchange_mut().apply_update(Update::Cancel);
 
-                self.track_query(
-                    EventData::output_stage("cancelled")
-                        .with_payload("message", "request was cancelled"),
-                );
+                    self.track_query(
+                        EventData::output_stage("cancelled")
+                            .with_payload("message", "request was cancelled"),
+                    );
 
-                tokio::spawn(self.store());
+                    tokio::spawn(self.store());
+                }
             }
 
             ExchangeState::Complete => {
@@ -168,6 +193,28 @@ impl Agent {
         match &action {
             Action::Query(s) => {
                 self.track_query(EventData::input_stage("query").with_payload("q", s));
+
+                // Always make a code search for the user query on the first exchange
+                if self.exchanges.len() == 1 {
+                    // Extract keywords from the query
+                    let keywords = {
+                        let sw = stop_words();
+                        let r = Rake::new(sw.clone());
+                        let keywords = r.run(s);
+
+                        if keywords.is_empty() {
+                            s.clone()
+                        } else {
+                            keywords
+                                .iter()
+                                .map(|k| k.keyword.clone())
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        }
+                    };
+
+                    self.code_search(&keywords).await?;
+                }
                 s.clone()
             }
 
@@ -180,6 +227,12 @@ impl Agent {
             Action::Code { query } => self.code_search(query).await?,
             Action::Proc { query, paths } => self.process_files(query, paths).await?,
         };
+
+        if self.last_exchange().search_steps.len() >= MAX_STEPS {
+            return Ok(Some(Action::Answer {
+                paths: self.paths().enumerate().map(|(i, _)| i).collect(),
+            }));
+        }
 
         let functions = serde_json::from_value::<Vec<llm_gateway::api::Function>>(
             prompts::functions(self.paths().next().is_some()), // Only add proc if there are paths in context
@@ -195,7 +248,7 @@ impl Agent {
 
         let raw_response = self
             .llm_gateway
-            .chat(
+            .chat_stream(
                 &trim_history(history.clone(), self.model)?,
                 Some(&functions),
             )
@@ -203,7 +256,14 @@ impl Agent {
             .try_fold(
                 llm_gateway::api::FunctionCall::default(),
                 |acc, e| async move {
-                    let e: FunctionCall = serde_json::from_str(&e)?;
+                    let e: FunctionCall = serde_json::from_str(&e).map_err(|err| {
+                        tracing::error!(
+                            "Failed to deserialize to FunctionCall: {:?}. Error: {:?}",
+                            e,
+                            err
+                        );
+                        err
+                    })?;
                     Ok(FunctionCall {
                         name: acc.name.or(e.name),
                         arguments: acc.arguments + &e.arguments,
@@ -308,6 +368,7 @@ impl Agent {
     async fn semantic_search(
         &self,
         query: parser::Literal<'_>,
+        paths: Vec<String>,
         limit: u64,
         offset: u64,
         threshold: f32,
@@ -316,14 +377,16 @@ impl Agent {
         let query = parser::SemanticQuery {
             target: Some(query),
             repos: [parser::Literal::Plain(self.repo_ref.display_name().into())].into(),
+            paths: paths
+                .iter()
+                .map(|p| parser::Literal::Plain(p.into()))
+                .collect(),
             ..self.last_exchange().query.clone()
         };
 
         debug!(?query, %self.thread_id, "executing semantic query");
         self.app
             .semantic
-            .as_ref()
-            .unwrap()
             .search(&query, limit, offset, threshold, retrieve_more)
             .await
     }
@@ -351,8 +414,6 @@ impl Agent {
         debug!(?queries, %self.thread_id, "executing semantic query");
         self.app
             .semantic
-            .as_ref()
-            .unwrap()
             .batch_search(queries.as_slice(), limit, offset, threshold, retrieve_more)
             .await
     }
@@ -392,7 +453,7 @@ impl Agent {
         let conversation = (self.repo_ref.clone(), self.exchanges.clone());
         let conversation_id = self
             .user
-            .login()
+            .username()
             .context("didn't have user ID")
             .map(|user_id| ConversationId {
                 thread_id: self.thread_id,

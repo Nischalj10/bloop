@@ -14,6 +14,7 @@ import { Trans, useTranslation } from 'react-i18next';
 import Button from '../../../../components/Button';
 import {
   ArrowRotate,
+  Info,
   PenUnderline,
   Sparkles,
   Template,
@@ -29,6 +30,7 @@ import {
 import MarkdownWithCode from '../../../../components/MarkdownWithCode';
 import { StudioContext } from '../../../../context/studioContext';
 import KeyboardChip from '../../KeyboardChip';
+import CopyButton from '../../../../components/MarkdownWithCode/CopyButton';
 
 type Props = {
   author: StudioConversationMessageAuthor;
@@ -39,6 +41,8 @@ type Props = {
   scrollToBottom?: () => void;
   inputRef?: React.MutableRefObject<HTMLTextAreaElement | null>;
   setLeftPanel: Dispatch<SetStateAction<StudioLeftPanelDataType>>;
+  isTokenLimitExceeded: boolean;
+  isLast: boolean;
 };
 
 const ConversationInput = ({
@@ -50,6 +54,8 @@ const ConversationInput = ({
   scrollToBottom,
   inputRef,
   setLeftPanel,
+  isLast,
+  isTokenLimitExceeded,
 }: Props) => {
   const { t } = useTranslation();
   const { envConfig } = useContext(DeviceContext);
@@ -173,6 +179,13 @@ const ConversationInput = ({
           </div>
         ) : (
           <>
+            {author === StudioConversationMessageAuthor.ASSISTANT && (
+              <CopyButton
+                code={message}
+                isInHeader
+                className="opacity-50 hover:opacity-100 mr-2"
+              />
+            )}
             <Button
               variant="secondary"
               size="tiny"
@@ -183,7 +196,7 @@ const ConversationInput = ({
             >
               <PenUnderline raw sizeClassName="w-3.5 h-3.5" />
             </Button>
-            {author === 'User' && (
+            {author === StudioConversationMessageAuthor.USER && (
               <Button
                 variant="secondary"
                 size="tiny"
@@ -236,7 +249,25 @@ const ConversationInput = ({
             />
           </>
         ) : (
-          <MarkdownWithCode markdown={message} isCodeStudio />
+          <>
+            <MarkdownWithCode markdown={message} isCodeStudio />
+            {author === StudioConversationMessageAuthor.ASSISTANT &&
+              isLast &&
+              isTokenLimitExceeded && (
+                <div
+                  className={
+                    'flex p-2 gap-2 items-start rounded bg-bg-danger/12 text-bg-danger caption'
+                  }
+                >
+                  <Info />
+                  <Trans>
+                    Token limit reached, this answer may be incomplete. To
+                    generate a full answer, please reduce the number of tokens
+                    used and regenerate.
+                  </Trans>
+                </div>
+              )}
+          </>
         )}
       </div>
     </div>
