@@ -10,6 +10,9 @@
 #![warn(unused_crate_dependencies)]
 #![allow(elided_lifetimes_in_paths)]
 
+#[cfg(all(feature = "onnx", feature = "metal"))]
+compile_error!("cannot enable `onnx` and `metal` at the same time");
+
 // only used in the binary
 #[cfg(feature = "color-eyre")]
 use color_eyre as _;
@@ -58,6 +61,7 @@ mod env;
 mod llm_gateway;
 mod remotes;
 mod repo;
+mod scraper;
 mod webserver;
 
 mod ee;
@@ -130,9 +134,9 @@ impl Application {
         config.max_threads = config.max_threads.max(minimum_parallelism());
         let threads = config.max_threads;
 
-        // 3MiB buffer size is minimum for Tantivy
-        config.buffer_size = config.buffer_size.max(threads * 3_000_000);
-        config.repo_buffer_size = config.repo_buffer_size.max(threads * 3_000_000);
+        // 15MiB buffer size is minimum for Tantivy
+        config.buffer_size = config.buffer_size.max(threads * 15_000_000);
+        config.repo_buffer_size = config.repo_buffer_size.max(threads * 15_000_000);
         config.source.set_default_dir(&config.index_dir);
 
         // Finalize config
@@ -163,14 +167,13 @@ impl Application {
 
             semantic.reset_collection_blocking().await?;
             debug!("semantic indexes deleted");
-
             debug!("state reset complete");
         }
 
         config.source.save_index_version()?;
         debug!("index version saved");
 
-        let indexes = Indexes::new(&config)?.into();
+        let indexes = Indexes::new(&config, sql.clone()).await?.into();
         debug!("indexes initialized");
 
         // Enforce capabilies and features depending on environment
@@ -251,6 +254,12 @@ impl Application {
         if !tracing_subscribe(config) {
             warn!("Failed to install tracing_subscriber. There's probably one already...");
         };
+
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            tracing::error!("panic occurred: {info}");
+            hook(info);
+        }));
 
         LOGGER_INSTALLED.set(true).unwrap();
     }
