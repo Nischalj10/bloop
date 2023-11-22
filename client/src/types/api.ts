@@ -1,5 +1,10 @@
 import { SymbolType, Range, TokenInfoType } from './results';
-import { StudioContextDoc, StudioContextFile } from './general';
+import {
+  DiffChunkType,
+  DiffHunkType,
+  StudioContextDoc,
+  StudioContextFile,
+} from './general';
 
 export interface RangeLine {
   byte: number;
@@ -74,6 +79,7 @@ export interface SearchResponseFile {
   repo_name: string;
   repo_ref: string;
   lang: string;
+  is_dir: boolean;
 }
 
 export interface FlagItem {
@@ -244,7 +250,34 @@ export type SearchStepType = ProcStep | CodeStep | PathStep;
 export type ConversationType = {
   id: string;
   search_steps: SearchStepType[];
-  query: { target: { Plain: string } };
+  query: {
+    raw_query: string;
+    repos: [];
+    paths: {
+      Plain: { start: number; end: number; content: string };
+    }[];
+    langs: {
+      Plain: {
+        start: number;
+        end: number;
+        content: string;
+      };
+    }[];
+    branch: {
+      Plain: {
+        start: number;
+        end: number;
+        content: string;
+      };
+    }[];
+    target: {
+      Plain: {
+        start: number;
+        end: number;
+        content: string;
+      };
+    };
+  };
   conclusion: string;
   answer: string;
   paths: string[];
@@ -345,4 +378,8 @@ export type DocSectionType = {
   absolute_url: string;
   section_range: { start: number; end: number };
   text: string;
+};
+
+export type GeneratedCodeDiff = {
+  chunks: DiffChunkType[];
 };
